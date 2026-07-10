@@ -34,7 +34,7 @@ have a permanent record of what's been plugged into your machine.
 
 ### Option A — the ready-made app (easiest, no Python needed)
 
-1. Go to the [**Releases**](https://github.com/joe963cost/USBSentry/releases/latest) page.
+1. Go to the [**Releases**](https://github.com/AxialForge/USBSentry/releases/latest) page.
 2. Download **`USBSentry.exe`**.
 3. Double-click it. That's it.
 
