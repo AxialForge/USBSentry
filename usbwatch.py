@@ -52,7 +52,14 @@ from PIL import Image, ImageDraw
 # ----------------------------------------------------------------------------
 
 APP_NAME = "USBSentry"
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Where to keep config / history / known-devices files.
+# When frozen by PyInstaller, __file__ lives in a temp extraction dir that is
+# deleted on exit, so we must use the folder that actually holds the .exe.
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 HISTORY_PATH = os.path.join(BASE_DIR, "history.csv")
 KNOWN_PATH = os.path.join(BASE_DIR, "known_devices.json")
