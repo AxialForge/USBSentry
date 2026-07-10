@@ -52,6 +52,7 @@ from PIL import Image, ImageDraw
 # ----------------------------------------------------------------------------
 
 APP_NAME = "USBSentry"
+APP_VERSION = "1.1.0"
 
 # Where to keep config / history / known-devices files.
 # When frozen by PyInstaller, __file__ lives in a temp extraction dir that is
@@ -256,7 +257,7 @@ class USBWatchApp:
 
     def _build_ui(self):
         self.root = tk.Tk()
-        self.root.title(APP_NAME)
+        self.root.title(f"{APP_NAME} v{APP_VERSION}")
         self.root.geometry("880x560")
         self.root.minsize(720, 420)
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
@@ -350,7 +351,7 @@ class USBWatchApp:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._tray_quit),
         )
-        self.icon = pystray.Icon(APP_NAME, make_tray_image(), APP_NAME, menu)
+        self.icon = pystray.Icon(APP_NAME, make_tray_image(), f"{APP_NAME} v{APP_VERSION}", menu)
         threading.Thread(target=self.icon.run, daemon=True).start()
 
     # -- Background scanning --------------------------------------------------
