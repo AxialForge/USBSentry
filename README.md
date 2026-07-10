@@ -131,8 +131,10 @@ USBSentry/
 └── .gitignore       # keeps build artifacts & personal files out of Git
 ```
 
-Runtime files created on your machine (`USBSentry.exe`, `config.json`,
-`history.csv`) are intentionally **not** tracked in Git.
+The prebuilt **`USBSentry.exe`** is included in the repo for convenience (you can
+also grab it from [Releases](https://github.com/AxialForge/USBSentry/releases/latest)).
+Personal runtime files (`config.json`, `history.csv`) are intentionally **not**
+tracked in Git.
 
 ## 📄 License
 
