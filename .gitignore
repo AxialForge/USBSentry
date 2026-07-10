@@ -2,11 +2,11 @@
 __pycache__/
 *.pyc
 
-# PyInstaller build output (the exe is a build artifact; rebuild from source)
+# PyInstaller build output
 build/
 dist/
 *.spec
-USBSentry.exe
+# Note: USBSentry.exe is intentionally committed to the repo (per request).
 
 # Local runtime files (personal to each user's machine)
 config.json
