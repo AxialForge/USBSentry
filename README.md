@@ -103,9 +103,23 @@ needs no special privileges.
 | Problem | Fix |
 |---|---|
 | No toast notifications | Check **Windows Settings → System → Notifications** is on, and that toasts are enabled in the app's **Settings…** |
-| SmartScreen warning on the exe | **More info → Run anyway** (unsigned app; happens once) |
+| "Windows protected your PC" on launch | See **Getting past the SmartScreen warning** below |
 | A device flickered and was missed | Lower the scan interval in **Settings…** |
 | Running from source fails | `pip install pystray pillow` (Tkinter ships with Python on Windows) |
+
+### Getting past the SmartScreen warning
+
+USBSentry isn't code-signed (signing certificates cost money), so Windows
+SmartScreen shows *"Windows protected your PC"* the first time you run a copy
+**downloaded from the internet**. It's not a virus warning — just an
+"unrecognized publisher" notice. Any of these clears it:
+
+- **Click through it (simplest):** on the warning, click **More info → Run anyway**. One time per download.
+- **Unblock the file:** right-click `USBSentry.exe` → **Properties** → tick **☑ Unblock** at the bottom → **OK**. Or in PowerShell: `Unblock-File .\USBSentry.exe`
+- **Run from source instead:** launching via `USBSentry.bat` / `python usbwatch.py` never triggers SmartScreen.
+
+> A copy you build yourself locally has no "Mark of the Web" and runs without any
+> warning — the prompt only appears on downloaded files.
 
 ## 📂 Project structure
 
