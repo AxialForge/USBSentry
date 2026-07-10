@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller build output (the exe is a build artifact; rebuild from source)
+build/
+dist/
+*.spec
+USBWatch.exe
+
+# Local runtime files (personal to each user's machine)
+config.json
+history.csv
