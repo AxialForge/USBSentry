@@ -18,6 +18,8 @@ USBSentry - a simple USB peripheral monitor for Windows 11.
 - Lists all currently connected USB peripherals and their details.
 - Watches in the background and alerts when a NEW device is connected
   (and notes when one is removed).
+- Can alert only for UNRECOGNIZED devices: trusts everything present at first
+  run, learns models (VID:PID) you approve, and flags anything unfamiliar.
 - Alerts three ways, each toggleable: Windows toast, in-app banner + row
   highlight, and a sound.
 - Lives in a normal window that hides to the system tray when closed;
@@ -53,14 +55,16 @@ APP_NAME = "USBSentry"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 HISTORY_PATH = os.path.join(BASE_DIR, "history.csv")
+KNOWN_PATH = os.path.join(BASE_DIR, "known_devices.json")
 HISTORY_HEADER = ["timestamp", "action", "device", "type", "vid_pid", "instance_id"]
 
 DEFAULT_CONFIG = {
-    "poll_seconds": 3,        # how often to re-scan the USB bus
-    "alert_toast": True,      # Windows notification
-    "alert_banner": True,     # in-app banner + row highlight
-    "alert_sound": True,      # play a chime
-    "show_hubs": False,       # include root hubs / internal USB devices
+    "poll_seconds": 3,          # how often to re-scan the USB bus
+    "alert_toast": True,        # Windows notification
+    "alert_banner": True,       # in-app banner + row highlight
+    "alert_sound": True,        # play a chime
+    "show_hubs": False,         # include root hubs / internal USB devices
+    "unrecognized_only": True,  # alert only for devices not in the known list
 }
 
 
@@ -78,6 +82,38 @@ def save_config(cfg):
     try:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
+    except OSError:
+        pass
+
+
+# ----------------------------------------------------------------------------
+# Known ("trusted") devices — identified by model, i.e. VID:PID
+# ----------------------------------------------------------------------------
+
+def device_key(dev):
+    """Identity used for the known-devices list: the device model (VID:PID).
+
+    Falls back to the full instance ID for the rare device with no VID:PID.
+    """
+    return dev.get("vid_pid") or dev.get("instance_id", "")
+
+
+def load_known():
+    """Return {device_key: friendly_name} of trusted device models."""
+    try:
+        with open(KNOWN_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def save_known(known):
+    try:
+        with open(KNOWN_PATH, "w", encoding="utf-8") as f:
+            json.dump(known, f, indent=2)
     except OSError:
         pass
 
@@ -195,6 +231,11 @@ class USBWatchApp:
         self.events = queue.Queue()  # worker -> UI messages
         self._stop = threading.Event()
 
+        # Known ("trusted") device models. If the file doesn't exist yet, this
+        # is the very first run — we auto-trust whatever is plugged in now.
+        self.known_file_existed = os.path.exists(KNOWN_PATH)
+        self.known = load_known()  # {device_key: name}
+
         self._ensure_history_file()
         self._build_ui()
         self._build_tray()
@@ -232,6 +273,7 @@ class USBWatchApp:
         bar = ttk.Frame(self.root, padding=(10, 8))
         bar.pack(fill="x")
         ttk.Button(bar, text="Refresh now", command=self.refresh_now).pack(side="left")
+        ttk.Button(bar, text="Trusted devices…", command=self.manage_known).pack(side="left", padx=(8, 0))
         ttk.Button(bar, text="Export log…", command=self.export_log).pack(side="left", padx=(8, 0))
         self.show_hubs_var = tk.BooleanVar(value=self.cfg["show_hubs"])
         ttk.Checkbutton(
@@ -245,24 +287,42 @@ class USBWatchApp:
         table_frame = ttk.Frame(self.root, padding=(10, 0))
         table_frame.pack(fill="both", expand=True)
 
-        cols = ("name", "class", "status", "manufacturer", "vid_pid")
+        cols = ("known", "name", "class", "status", "manufacturer", "vid_pid")
         headings = {
-            "name": "Device", "class": "Type", "status": "Status",
+            "known": "Known?", "name": "Device", "class": "Type", "status": "Status",
             "manufacturer": "Manufacturer", "vid_pid": "VID:PID",
         }
-        widths = {"name": 300, "class": 110, "status": 80, "manufacturer": 220, "vid_pid": 110}
+        widths = {"known": 62, "name": 280, "class": 110, "status": 75, "manufacturer": 210, "vid_pid": 105}
+        anchors = {"known": "center"}
 
         self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="browse")
         for c in cols:
             self.tree.heading(c, text=headings[c])
-            self.tree.column(c, width=widths[c], anchor="w")
-        self.tree.tag_configure("new", background="#fff2b2")
+            self.tree.column(c, width=widths[c], anchor=anchors.get(c, "w"))
+        self.tree.tag_configure("new", background="#fff2b2")        # newly connected (trusted)
+        self.tree.tag_configure("untrusted", background="#f8c9c4")  # not on the known list
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
+
+        # Right-click menu to trust/untrust a device.
+        self.ctx_menu = tk.Menu(self.tree, tearoff=0)
+        self.ctx_menu.add_command(label="Trust this device (stop alerting)", command=self._ctx_trust)
+        self.ctx_menu.add_command(label="Untrust this device", command=self._ctx_untrust)
+        self.tree.bind("<Button-3>", self._show_ctx_menu)
 
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
+
+        # Legend for the row colors.
+        legend = tk.Frame(self.root)
+        legend.pack(fill="x", padx=12, pady=(4, 0))
+        tk.Label(legend, text="  Legend:  ", font=("Segoe UI", 8)).pack(side="left")
+        tk.Label(legend, text=" unrecognized ", bg="#f8c9c4", font=("Segoe UI", 8)).pack(side="left")
+        tk.Label(legend, text="   ", font=("Segoe UI", 8)).pack(side="left")
+        tk.Label(legend, text=" newly connected ", bg="#fff2b2", font=("Segoe UI", 8)).pack(side="left")
+        tk.Label(legend, text="    Right-click a device to trust / untrust it.",
+                 font=("Segoe UI", 8), fg="#555").pack(side="left")
 
         # Detail line for the selected device
         self.detail_var = tk.StringVar(value="Select a device to see its full instance ID.")
@@ -322,6 +382,13 @@ class USBWatchApp:
         if not self.baseline_ready:
             self.devices = devices
             self.baseline_ready = True
+            # On the very first run, trust everything already connected — it's
+            # all the user's own gear.
+            if not self.known_file_existed:
+                for dev in devices.values():
+                    self.known[device_key(dev)] = dev["name"]
+                save_known(self.known)
+                self._log(f"Auto-trusted {len(self.known)} device(s) present at first run.")
             self._redraw_table()
             self._set_banner_idle()
             self._log(f"Baseline: {len(devices)} device(s) already connected.")
@@ -337,11 +404,22 @@ class USBWatchApp:
 
         if added:
             self.new_ids |= added
-            names = [devices[a]["name"] for a in added]
             for a in added:
-                self._log(f"NEW      {devices[a]['name']}  [{devices[a].get('vid_pid','')}]")
-                self._record_event("CONNECTED", devices[a])
-            self._alert(names)
+                dev = devices[a]
+                trusted = self.is_trusted(dev)
+                flag = "" if trusted else "  <-- UNRECOGNIZED"
+                self._log(f"NEW      {dev['name']}  [{dev.get('vid_pid','')}]{flag}")
+                self._record_event("CONNECTED" if trusted else "CONNECTED-UNRECOGNIZED", dev)
+
+            # Decide which of the new devices actually warrant an alert.
+            if self.cfg.get("unrecognized_only", True):
+                alert_devs = [devices[a] for a in added if not self.is_trusted(devices[a])]
+            else:
+                alert_devs = [devices[a] for a in added]
+
+            if alert_devs:
+                unrecognized = any(not self.is_trusted(d) for d in alert_devs)
+                self._alert([d["name"] for d in alert_devs], unrecognized=unrecognized)
 
         self._redraw_table()
 
@@ -350,14 +428,41 @@ class USBWatchApp:
             if not self.new_ids:
                 self._set_banner_idle()
 
+    # -- Trust (known devices) -----------------------------------------------
+
+    def is_trusted(self, dev):
+        return device_key(dev) in self.known
+
+    def trust_device(self, dev):
+        key = device_key(dev)
+        if key:
+            self.known[key] = dev["name"]
+            save_known(self.known)
+            self._log(f"TRUSTED    {dev['name']}  [{key}]")
+            self._redraw_table()
+
+    def untrust_device(self, dev):
+        key = device_key(dev)
+        if key in self.known:
+            del self.known[key]
+            save_known(self.known)
+            self._log(f"UNTRUSTED  {dev['name']}  [{key}]")
+            self._redraw_table()
+
     # -- Alerts ---------------------------------------------------------------
 
-    def _alert(self, names):
-        label = names[0] if len(names) == 1 else f"{len(names)} new devices"
+    def _alert(self, names, unrecognized=False):
+        joined = ", ".join(names)
 
         if self.cfg["alert_banner"]:
-            self.banner.configure(bg="#d9822b")
-            self.banner_var.set(f"\U0001F514  New device connected:  {', '.join(names)}")
+            if unrecognized:
+                self.banner.configure(bg="#c0392b")
+                self.banner_var.set(
+                    f"⚠  UNRECOGNIZED device connected:  {joined}"
+                    f"    (right-click it to trust)")
+            else:
+                self.banner.configure(bg="#d9822b")
+                self.banner_var.set(f"\U0001F514  New device connected:  {joined}")
 
         if self.cfg["alert_sound"]:
             try:
@@ -366,8 +471,9 @@ class USBWatchApp:
                 pass
 
         if self.cfg["alert_toast"]:
+            title = "⚠ Unrecognized USB device!" if unrecognized else "USB device connected"
             try:
-                self.icon.notify(", ".join(names), "USB device connected")
+                self.icon.notify(joined, title)
             except Exception:
                 pass
 
@@ -387,13 +493,20 @@ class USBWatchApp:
 
     def _redraw_table(self):
         selected = self.tree.selection()
-        sel_id = self.tree.item(selected[0])["values"][-1] if selected else None
+        sel_id = selected[0] if selected else None
 
         self.tree.delete(*self.tree.get_children())
         for iid, dev in sorted(self.devices.items(), key=lambda kv: kv[1]["name"].lower()):
-            tags = ("new",) if iid in self.new_ids else ()
-            # Stash the instance_id as an extra (hidden) trailing value via iid.
+            trusted = self.is_trusted(dev)
+            if not trusted:
+                tags = ("untrusted",)
+            elif iid in self.new_ids:
+                tags = ("new",)
+            else:
+                tags = ()
+            # The tree item id (iid) is the device's instance_id.
             self.tree.insert("", "end", iid=iid, tags=tags, values=(
+                "✓" if trusted else "✕",
                 dev["name"], dev["class"], dev["status"],
                 dev["manufacturer"], dev["vid_pid"],
             ))
@@ -406,7 +519,33 @@ class USBWatchApp:
             return
         dev = self.devices.get(sel[0])
         if dev:
-            self.detail_var.set(f"Instance ID:  {dev['instance_id']}")
+            status = "TRUSTED (known)" if self.is_trusted(dev) else "NOT trusted — unrecognized"
+            self.detail_var.set(f"{status}    |    Instance ID:  {dev['instance_id']}")
+
+    # -- Right-click trust menu ----------------------------------------------
+
+    def _show_ctx_menu(self, event):
+        row = self.tree.identify_row(event.y)
+        if not row or row not in self.devices:
+            return
+        self.tree.selection_set(row)
+        self._ctx_target = row
+        trusted = self.is_trusted(self.devices[row])
+        self.ctx_menu.entryconfigure(0, state="disabled" if trusted else "normal")
+        self.ctx_menu.entryconfigure(1, state="normal" if trusted else "disabled")
+        self.ctx_menu.tk_popup(event.x_root, event.y_root)
+
+    def _ctx_trust(self):
+        dev = self.devices.get(getattr(self, "_ctx_target", None))
+        if dev:
+            self.trust_device(dev)
+            if not self.new_ids:
+                self._set_banner_idle()
+
+    def _ctx_untrust(self):
+        dev = self.devices.get(getattr(self, "_ctx_target", None))
+        if dev:
+            self.untrust_device(dev)
 
     # -- Log ------------------------------------------------------------------
 
@@ -459,6 +598,53 @@ class USBWatchApp:
         except OSError as exc:
             self._log(f"Export failed: {exc}")
 
+    # -- Known-devices manager ------------------------------------------------
+
+    def manage_known(self):
+        win = tk.Toplevel(self.root)
+        win.title("Trusted (known) devices")
+        win.transient(self.root)
+        win.geometry("520x360")
+        frm = ttk.Frame(win, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="These device models are trusted and won't raise an "
+                            "“unrecognized” alert:",
+                  font=("Segoe UI", 10, "bold"), wraplength=480).pack(anchor="w", pady=(0, 8))
+
+        list_frame = ttk.Frame(frm)
+        list_frame.pack(fill="both", expand=True)
+        lb = tk.Listbox(list_frame, activestyle="none")
+        lb.pack(side="left", fill="both", expand=True)
+        lsb = ttk.Scrollbar(list_frame, orient="vertical", command=lb.yview)
+        lb.configure(yscrollcommand=lsb.set)
+        lsb.pack(side="right", fill="y")
+
+        # Keep a parallel list of keys matching the listbox order.
+        order = sorted(self.known.items(), key=lambda kv: kv[1].lower())
+        keys = [k for k, _ in order]
+        for k, name in order:
+            lb.insert("end", f"{name}    [{k}]")
+
+        def remove_selected():
+            sel = lb.curselection()
+            if not sel:
+                return
+            i = sel[0]
+            self.known.pop(keys[i], None)
+            save_known(self.known)
+            keys.pop(i)
+            lb.delete(i)
+            self._redraw_table()
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(8, 0))
+        ttk.Button(btns, text="Remove selected (untrust)", command=remove_selected).pack(side="left")
+        ttk.Label(btns, text=f"{len(keys)} trusted", foreground="#555").pack(side="right")
+        ttk.Button(btns, text="Close", command=win.destroy).pack(side="right", padx=(0, 12))
+
+        win.grab_set()
+
     # -- Actions --------------------------------------------------------------
 
     def refresh_now(self):
@@ -497,20 +683,31 @@ class USBWatchApp:
 
         ttk.Separator(frm, orient="horizontal").grid(row=4, column=0, columnspan=2, sticky="ew", pady=12)
 
-        ttk.Label(frm, text="Scan every (seconds):").grid(row=5, column=0, sticky="w")
+        v_unrec = tk.BooleanVar(value=self.cfg.get("unrecognized_only", True))
+        ttk.Checkbutton(frm, text="Only alert for unrecognized (untrusted) devices",
+                        variable=v_unrec).grid(row=5, column=0, columnspan=2, sticky="w")
+        ttk.Label(frm, text="When on, devices you've trusted connect silently. "
+                            "Manage the list via “Trusted devices…”.",
+                  foreground="#555", wraplength=360).grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 4))
+
+        ttk.Separator(frm, orient="horizontal").grid(row=7, column=0, columnspan=2, sticky="ew", pady=12)
+
+        ttk.Label(frm, text="Scan every (seconds):").grid(row=8, column=0, sticky="w")
         v_poll = tk.IntVar(value=int(self.cfg["poll_seconds"]))
-        ttk.Spinbox(frm, from_=1, to=60, textvariable=v_poll, width=6).grid(row=5, column=1, sticky="w", padx=(8, 0))
+        ttk.Spinbox(frm, from_=1, to=60, textvariable=v_poll, width=6).grid(row=8, column=1, sticky="w", padx=(8, 0))
 
         def apply_and_close():
             self.cfg["alert_toast"] = v_toast.get()
             self.cfg["alert_banner"] = v_banner.get()
             self.cfg["alert_sound"] = v_sound.get()
+            self.cfg["unrecognized_only"] = v_unrec.get()
             self.cfg["poll_seconds"] = max(1, int(v_poll.get()))
             save_config(self.cfg)
             win.destroy()
+            self._redraw_table()
 
         btns = ttk.Frame(frm)
-        btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(16, 0))
+        btns.grid(row=9, column=0, columnspan=2, sticky="e", pady=(16, 0))
         ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right", padx=(8, 0))
         ttk.Button(btns, text="Save", command=apply_and_close).pack(side="right")
 

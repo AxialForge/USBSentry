@@ -11,3 +11,4 @@ dist/
 # Local runtime files (personal to each user's machine)
 config.json
 history.csv
+known_devices.json

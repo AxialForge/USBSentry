@@ -25,6 +25,7 @@ have a permanent record of what's been plugged into your machine.
 
 - **📋 Live device list** — every connected USB peripheral with its name, type, status, manufacturer, and `VID:PID`. Click any device to see its full instance ID.
 - **🔔 New-device alerts, three ways** — a Windows toast notification, an in-app banner + highlighted row, and a sound. Each can be toggled on or off independently.
+- **🕵️ Unrecognized-device mode** — trust the gear you already own and get alerted *only* when an unfamiliar device (a make/model you've never approved) shows up. Everything plugged in at first launch is auto-trusted; right-click any device to trust or untrust it afterward.
 - **🧹 "Real peripherals only"** — internal root hubs and generic USB hubs are hidden by default so the list stays clean. One checkbox reveals *everything* on the bus.
 - **📝 Durable event history** — every connect/disconnect is saved to `history.csv` automatically and survives restarts. Export the full log anywhere with one click.
 - **🪟 Stays out of the way** — closing the window hides it to the system tray, where it keeps watching. Quit only when *you* choose to.
@@ -63,14 +64,33 @@ Or just double-click **`USBSentry.bat`**.
 | Bring the window back | Left-click the tray icon |
 | Refresh / Quit | Right-click the tray icon |
 | Show internal hubs too | Tick **"Show hubs & internal devices"** |
+| Trust / untrust a device | **Right-click** it in the list |
+| See or edit trusted devices | **Trusted devices…** button |
 | Export the event log | **Export log…** button → pick a location |
 | Change alerts / scan speed | **Settings…** button |
 
 ## ⚙️ Settings
 
 Open **Settings…** to independently toggle each alert type (toast / banner /
-sound) and set how often USBSentry scans the bus (default: every 3 seconds).
-Your preferences are saved to `config.json` next to the app.
+sound), turn **"Only alert for unrecognized devices"** on or off, and set how
+often USBSentry scans the bus (default: every 3 seconds). Your preferences are
+saved to `config.json` next to the app.
+
+## 🕵️ Unrecognized-device mode
+
+Tired of being alerted about your own keyboard and mouse? Turn on **"Only alert
+for unrecognized devices"** in Settings.
+
+- Everything plugged in the **first time** you run USBSentry is automatically
+  trusted — it's all your own gear.
+- After that, only an **unfamiliar device** (a make/model — VID:PID — you've
+  never approved) triggers an alert. It shows up **red** in the list.
+- **Right-click** any device to **Trust** it (stops future alerts) or **Untrust**
+  it. Manage the whole list with the **Trusted devices…** button.
+- Trusted models are remembered in `known_devices.json` next to the app.
+
+Matching is by **device model**, so moving your own device to a different USB
+port never counts as "new."
 
 ## 🟢 Start automatically on boot (optional)
 
@@ -133,8 +153,8 @@ USBSentry/
 
 The prebuilt **`USBSentry.exe`** is included in the repo for convenience (you can
 also grab it from [Releases](https://github.com/AxialForge/USBSentry/releases/latest)).
-Personal runtime files (`config.json`, `history.csv`) are intentionally **not**
-tracked in Git.
+Personal runtime files (`config.json`, `history.csv`, `known_devices.json`) are
+intentionally **not** tracked in Git.
 
 ## 📄 License
 
