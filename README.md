@@ -134,6 +134,16 @@ USBSentry/
 Runtime files created on your machine (`USBSentry.exe`, `config.json`,
 `history.csv`) are intentionally **not** tracked in Git.
 
+## 📄 License
+
+Copyright © 2026 **Joseph Costarella (AxialForge)**.
+
+USBSentry is licensed under the **[Apache License 2.0](LICENSE)**. You're free to
+use, modify, and distribute it — including commercially — provided you retain the
+copyright and license notices. The names "USBSentry" and "AxialForge" are
+reserved and not licensed for others' use. The software is provided **"as is"**,
+without warranty of any kind.
+
 ---
 
 <p align="center"><sub>Built for Windows 11 · Python + Tkinter · No install required</sub></p>
