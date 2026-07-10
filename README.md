@@ -1,74 +1,125 @@
-# USB Watch
+<h1 align="center">🛡️ USBSentry</h1>
 
-A simple USB peripheral monitor for Windows 11. It lists every USB device
-currently connected, watches the USB bus in the background, and alerts you the
-moment a new device is plugged in.
+<p align="center">
+  <strong>A simple, lightweight USB peripheral monitor for Windows 11.</strong><br>
+  See every connected USB device at a glance — and get alerted the instant a new one is plugged in.
+</p>
 
-## How to run it
+<p align="center">
+  <img src="https://img.shields.io/badge/platform-Windows%2011-0078D6?logo=windows&logoColor=white" alt="Windows 11">
+  <img src="https://img.shields.io/badge/python-3.13-3776AB?logo=python&logoColor=white" alt="Python 3.13">
+  <img src="https://img.shields.io/badge/UI-Tkinter-FF8C00" alt="Tkinter">
+  <img src="https://img.shields.io/badge/install-none%20needed-brightgreen" alt="No install needed">
+</p>
 
-**Easiest of all:** double-click **`USBWatch.exe`** — a self-contained build
-that needs nothing installed. Copy it to any Windows PC and it just runs.
+---
 
-**Or (needs Python):** double-click **`USB Watch.bat`**.
+## ✨ What it does
 
-That's it — a window opens showing all connected USB peripherals. Close the
-window and it keeps running quietly in the **system tray** (bottom-right, near
-the clock). Left-click the tray icon to bring the window back; right-click it
-for **Refresh / Quit**.
+USBSentry sits quietly in your system tray and keeps an eye on the USB bus. When
+you plug in a new device, it lets you know — with a notification, a sound, and a
+highlight in its live device list. Every connect and disconnect is logged so you
+have a permanent record of what's been plugged into your machine.
 
-You can also run it from a terminal:
+## 🚀 Features
 
-```
+- **📋 Live device list** — every connected USB peripheral with its name, type, status, manufacturer, and `VID:PID`. Click any device to see its full instance ID.
+- **🔔 New-device alerts, three ways** — a Windows toast notification, an in-app banner + highlighted row, and a sound. Each can be toggled on or off independently.
+- **🧹 "Real peripherals only"** — internal root hubs and generic USB hubs are hidden by default so the list stays clean. One checkbox reveals *everything* on the bus.
+- **📝 Durable event history** — every connect/disconnect is saved to `history.csv` automatically and survives restarts. Export the full log anywhere with one click.
+- **🪟 Stays out of the way** — closing the window hides it to the system tray, where it keeps watching. Quit only when *you* choose to.
+- **⚡ Lightweight & permission-free** — no drivers, no admin rights. Reads device info through Windows' own tooling.
+
+## 📥 Download & run
+
+### Option A — the ready-made app (easiest, no Python needed)
+
+1. Go to the [**Releases**](https://github.com/joe963cost/USBSentry/releases/latest) page.
+2. Download **`USBSentry.exe`**.
+3. Double-click it. That's it.
+
+> The first time you run it, Windows SmartScreen may show *"Windows protected
+> your PC"* because the app isn't code-signed. Click **More info → Run anyway**.
+> This is normal for small independent apps and only happens once.
+
+### Option B — run from source (for tinkering)
+
+Requires [Python 3](https://www.python.org/downloads/) with two small packages:
+
+```bash
+pip install pystray pillow
 python usbwatch.py
 ```
 
-## What it does
+Or just double-click **`USBSentry.bat`**.
 
-- **Live device list** — Device name, Type, Status, Manufacturer, and VID:PID.
-  Click a row to see its full instance ID at the bottom.
-- **New-device alerts** — when something is plugged in after startup, you get
-  (any combination of): a Windows toast notification, an in-app orange banner +
-  yellow row highlight, and a sound. The tray icon briefly turns red.
-- **Removed devices** are noted in the Activity log at the bottom.
-- **Event history** — every connect/disconnect is saved to `history.csv` in this
-  folder automatically (it survives restarts). Click **Export log…** to save a
-  copy of the full history anywhere you like (CSV, opens in Excel).
-- **"Real peripherals only"** by default — internal root hubs and generic USB
-  hubs are hidden. Tick **"Show hubs & internal devices"** to see everything.
+## 🖱️ Using it
 
-## Settings
+| Action | How |
+|---|---|
+| See all connected devices | It's the main window |
+| Inspect one device | Click its row → full instance ID shows at the bottom |
+| Hide but keep watching | Close the window (it goes to the tray) |
+| Bring the window back | Left-click the tray icon |
+| Refresh / Quit | Right-click the tray icon |
+| Show internal hubs too | Tick **"Show hubs & internal devices"** |
+| Export the event log | **Export log…** button → pick a location |
+| Change alerts / scan speed | **Settings…** button |
 
-Click **Settings…** to toggle each of the three alert types independently and to
-change how often it scans (default: every 3 seconds). Your choices are saved to
-`config.json` in this folder.
+## ⚙️ Settings
 
-## Start automatically when Windows boots (optional)
+Open **Settings…** to independently toggle each alert type (toast / banner /
+sound) and set how often USBSentry scans the bus (default: every 3 seconds).
+Your preferences are saved to `config.json` next to the app.
 
-1. Press `Win + R`, type `shell:startup`, press Enter.
-2. Right-click `USB Watch.bat` → **Copy**, then paste a **shortcut** to it into
-   that Startup folder.
+## 🟢 Start automatically on boot (optional)
 
-Now it launches (and starts watching) every time you log in.
+1. Press `Win + R`, type `shell:startup`, and press Enter.
+2. Drop a **shortcut** to `USBSentry.exe` (or `USBSentry.bat`) into that folder.
 
-## Rebuilding the .exe (only if you edit the code)
+USBSentry will now start watching every time you log in.
 
-`USBWatch.exe` is already built and ready. If you change `usbwatch.py` and want
-a fresh exe, rebuild it with:
+## 🛠️ Building the .exe yourself
+
+The release exe is built with [PyInstaller](https://pyinstaller.org/):
+
+```bash
+pip install pyinstaller
+python -m PyInstaller --noconsole --onefile --name "USBSentry" --clean usbwatch.py
+```
+
+The finished `USBSentry.exe` appears in the new `dist\` folder.
+
+## 🔍 How it works
+
+USBSentry runs Windows' built-in `Get-PnpDevice` command every few seconds,
+filters the results to devices on the USB bus, and compares each snapshot to the
+last one. Anything new triggers an alert; anything missing is logged as removed.
+No kernel hooks, no polling drivers — just a light, transparent approach that
+needs no special privileges.
+
+## 🧯 Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| No toast notifications | Check **Windows Settings → System → Notifications** is on, and that toasts are enabled in the app's **Settings…** |
+| SmartScreen warning on the exe | **More info → Run anyway** (unsigned app; happens once) |
+| A device flickered and was missed | Lower the scan interval in **Settings…** |
+| Running from source fails | `pip install pystray pillow` (Tkinter ships with Python on Windows) |
+
+## 📂 Project structure
 
 ```
-cd "C:\Users\Joseph Costarella\USBWatch"
-python -m PyInstaller --noconsole --onefile --name "USBWatch" --clean usbwatch.py
+USBSentry/
+├── usbwatch.py      # the entire app (one file)
+├── USBSentry.bat    # launcher for the source version
+├── README.md        # this file
+└── .gitignore       # keeps build artifacts & personal files out of Git
 ```
 
-The new exe lands in `dist\USBWatch.exe`; copy it up into this folder to replace
-the old one.
+Runtime files created on your machine (`USBSentry.exe`, `config.json`,
+`history.csv`) are intentionally **not** tracked in Git.
 
-## Notes / troubleshooting
+---
 
-- **How it reads USB info:** it runs Windows' built-in `Get-PnpDevice`
-  PowerShell command every few seconds and compares snapshots. No drivers, no
-  admin rights needed.
-- **Not seeing toasts?** Check Windows **Settings → System → Notifications** is
-  on, and that the toast option is enabled in the app's Settings.
-- **Requirements:** Python 3 with `pystray` and `Pillow`
-  (`pip install pystray pillow`). Tkinter ships with Python on Windows.
+<p align="center"><sub>Built for Windows 11 · Python + Tkinter · No install required</sub></p>

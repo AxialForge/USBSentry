@@ -1,5 +1,5 @@
 """
-USB Watch - a simple USB peripheral monitor for Windows 11.
+USBSentry - a simple USB peripheral monitor for Windows 11.
 
 - Lists all currently connected USB peripherals and their details.
 - Watches in the background and alerts when a NEW device is connected
@@ -35,7 +35,7 @@ from PIL import Image, ImageDraw
 # Config
 # ----------------------------------------------------------------------------
 
-APP_NAME = "USB Watch"
+APP_NAME = "USBSentry"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 HISTORY_PATH = os.path.join(BASE_DIR, "history.csv")
@@ -541,6 +541,6 @@ class USBWatchApp:
 
 if __name__ == "__main__":
     if sys.platform != "win32":
-        print("USB Watch is Windows-only.")
+        print("USBSentry is Windows-only.")
         sys.exit(1)
     USBWatchApp().run()

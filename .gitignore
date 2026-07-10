@@ -6,7 +6,7 @@ __pycache__/
 build/
 dist/
 *.spec
-USBWatch.exe
+USBSentry.exe
 
 # Local runtime files (personal to each user's machine)
 config.json
