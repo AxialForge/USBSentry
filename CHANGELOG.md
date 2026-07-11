@@ -7,7 +7,9 @@ follows [Semantic Versioning](https://semver.org/) (MAJOR.MINOR.PATCH).
 
 ### Added
 - Port / Drive column: shows the COM port for serial devices (ESP32, Arduino,
-  CP210x, CH340, FTDI) and, for USB storage, the drive letter.
+  CP210x, CH340, FTDI) and, for USB storage, the drive letter and capacity.
+- Distinct alert when a USB storage device (flash drive) is connected, with its
+  drive letter and free/total space; toggleable in Settings.
 - ESP32 workflow: right-click a serial device to copy its COM port, its VID:PID,
   or a ready-made esptool flash command; double-click a device to copy its port.
 - Watch-a-board: mark a device so you always get a port-aware toast

@@ -158,6 +158,7 @@ DEFAULT_CONFIG = {
     "hidden": [],               # device_keys hidden from the list
     "sound_name": "Chime",      # which alert sound to play
     "watched": [],              # device_keys to always announce on reconnect
+    "alert_storage": True,      # flag USB storage (flash drives) distinctly
 }
 
 TEXT_SIZES = {"Small": 8, "Normal": 10, "Large": 12, "Extra-large": 14}
@@ -285,12 +286,37 @@ def save_known(known):
 # USB enumeration (via PowerShell's Get-PnpDevice)
 # ----------------------------------------------------------------------------
 
-_PS_QUERY = (
-    "Get-PnpDevice -PresentOnly | "
-    "Where-Object { $_.InstanceId -like 'USB\\*' } | "
-    "Select-Object FriendlyName, Class, Status, Manufacturer, InstanceId | "
-    "ConvertTo-Json -Compress -Depth 3"
-)
+# One call returns both the USB device list and any USB storage volumes (drive
+# letter + capacity), so we only spawn PowerShell once per scan.
+_PS_QUERY = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+$devs = Get-PnpDevice -PresentOnly |
+    Where-Object { $_.InstanceId -like 'USB\*' } |
+    Select-Object FriendlyName, Class, Status, Manufacturer, InstanceId
+$storage = Get-CimInstance Win32_DiskDrive | Where-Object { $_.InterfaceType -eq 'USB' } | ForEach-Object {
+    $disk = $_
+    Get-CimAssociatedInstance -InputObject $disk -ResultClassName Win32_DiskPartition | ForEach-Object {
+        Get-CimAssociatedInstance -InputObject $_ -ResultClassName Win32_LogicalDisk | ForEach-Object {
+            [pscustomobject]@{ pnp = $disk.PNPDeviceID; drive = $_.DeviceID;
+                               size = $_.Size; free = $_.FreeSpace; fs = $_.FileSystem }
+        }
+    }
+}
+[pscustomobject]@{ devices = @($devs); storage = @($storage) } | ConvertTo-Json -Compress -Depth 4
+"""
+
+
+def _serial_of(instance_or_pnp):
+    """Last path segment, minged to the bare serial (drops a trailing &N)."""
+    tail = instance_or_pnp.replace("/", "\\").split("\\")[-1]
+    return tail.split("&")[0].upper()
+
+
+def _fmt_gb(n):
+    try:
+        return f"{float(n) / (1024 ** 3):.1f} GB"
+    except (TypeError, ValueError):
+        return ""
 
 _VIDPID_RE = re.compile(r"VID_([0-9A-Fa-f]{4}).*?PID_([0-9A-Fa-f]{4})")
 _COM_RE = re.compile(r"\((COM\d+)\)")
@@ -340,11 +366,22 @@ def get_devices(show_hubs):
     except ValueError:
         return {}
 
-    if isinstance(data, dict):
-        data = [data]
+    dev_list = data.get("devices") or []
+    if isinstance(dev_list, dict):
+        dev_list = [dev_list]
+    storage_list = data.get("storage") or []
+    if isinstance(storage_list, dict):
+        storage_list = [storage_list]
+
+    # Map each USB storage disk's serial -> drive letter + capacity.
+    storage_by_serial = {}
+    for s in storage_list:
+        serial = _serial_of(s.get("pnp") or "")
+        if serial:
+            storage_by_serial[serial] = s
 
     devices = {}
-    for item in data:
+    for item in dev_list:
         instance_id = (item.get("InstanceId") or "").strip()
         if not instance_id:
             continue
@@ -355,19 +392,32 @@ def get_devices(show_hubs):
         m = _VIDPID_RE.search(instance_id)
         vid_pid = f"{m.group(1).upper()}:{m.group(2).upper()}" if m else ""
         vid = m.group(1).upper() if m else ""
+        klass = (item.get("Class") or "").strip()
 
         cm = _COM_RE.search(name)
         com_port = cm.group(1) if cm else ""
 
+        # Storage: match this device's serial to a mounted USB volume.
+        drive, capacity = "", ""
+        s = storage_by_serial.get(_serial_of(instance_id))
+        if s:
+            drive = (s.get("drive") or "").strip()
+            size, free = s.get("size"), s.get("free")
+            if size:
+                capacity = f"{_fmt_gb(free)} free / {_fmt_gb(size)} {s.get('fs') or ''}".strip()
+        is_storage = bool(drive) or "mass storage" in name.lower() or klass in ("DiskDrive",)
+
         devices[instance_id] = {
             "instance_id": instance_id,
             "name": name,
-            "class": (item.get("Class") or "").strip(),
+            "class": klass,
             "status": (item.get("Status") or "").strip(),
             "manufacturer": (item.get("Manufacturer") or "").strip(),
             "vid_pid": vid_pid,
             "com_port": com_port,
-            "drive": "",  # populated later for USB storage
+            "drive": drive,
+            "capacity": capacity,
+            "is_storage": is_storage,
             "board_hint": _SERIAL_VIDS.get(vid, ""),
         }
     return devices
@@ -735,20 +785,27 @@ class USBWatchApp:
                 self._log(f"NEW      {dev['name']}  [{dev.get('vid_pid', '')}]{flag}")
                 self._record_event("CONNECTED" if trusted else "CONNECTED-UNRECOGNIZED", dev)
 
-            # Watched boards always get their own port-aware toast; keep them out
-            # of the normal alert so we don't double-notify.
-            watched_added = [devices[a] for a in added if device_key(devices[a]) in self.watched]
+            # Priority so we never double-notify: watched > storage > normal.
+            added_devs = [devices[a] for a in added]
+            watched_added = [d for d in added_devs if device_key(d) in self.watched]
+            rest = [d for d in added_devs if device_key(d) not in self.watched]
+
+            if self.cfg.get("alert_storage", True):
+                storage_added = [d for d in rest if d.get("is_storage")]
+            else:
+                storage_added = []
+            rest = [d for d in rest if d not in storage_added]
 
             if self.cfg.get("unrecognized_only", True):
-                alert_devs = [devices[a] for a in added if not self.is_trusted(devices[a])]
+                alert_devs = [d for d in rest if not self.is_trusted(d)]
             else:
-                alert_devs = [devices[a] for a in added]
-            alert_devs = [d for d in alert_devs if device_key(d) not in self.watched]
+                alert_devs = rest
 
             if alert_devs:
                 unrecognized = any(not self.is_trusted(d) for d in alert_devs)
                 self._alert([d["name"] for d in alert_devs], unrecognized=unrecognized)
-
+            for d in storage_added:
+                self._announce_storage(d)
             for d in watched_added:
                 self._announce_watched(d)
 
@@ -823,6 +880,29 @@ class USBWatchApp:
             except Exception:
                 pass
 
+        try:
+            self.icon.icon = self._tray_alert
+            self.root.after(4000, lambda: setattr(self.icon, "icon", self._tray_normal))
+        except Exception:
+            pass
+
+    def _announce_storage(self, dev):
+        """A USB storage device was inserted — flag it distinctly."""
+        drive = dev.get("drive") or ""
+        where = f"  {drive}" if drive else ""
+        cap = f"  ({dev.get('capacity')})" if dev.get("capacity") else ""
+        msg = f"{dev['name']}{where}{cap}"
+        self._log(f"USB STORAGE connected:  {msg}")
+        if self.cfg["alert_banner"]:
+            self.banner.configure(bg=self.palette["alert_bg"], fg="#ffffff")
+            self.banner_var.set(f"💾  USB storage connected:  {msg}")
+        if self.cfg["alert_sound"]:
+            play_sound(self.cfg.get("sound_name", "Chime"))
+        if self.cfg["alert_toast"]:
+            try:
+                self.icon.notify(msg, "💾 USB storage connected")
+            except Exception:
+                pass
         try:
             self.icon.icon = self._tray_alert
             self.root.after(4000, lambda: setattr(self.icon, "icon", self._tray_normal))
@@ -909,7 +989,12 @@ class USBWatchApp:
         dev = self.devices.get(sel[0])
         if dev:
             status = "TRUSTED (known)" if self.is_trusted(dev) else "NOT trusted — unrecognized"
-            self.detail_var.set(f"{status}    |    Instance ID:  {dev['instance_id']}")
+            extra = ""
+            if dev.get("com_port"):
+                extra = f"    |    Port: {dev['com_port']}"
+            elif dev.get("drive"):
+                extra = f"    |    Drive: {dev['drive']}  {dev.get('capacity', '')}".rstrip()
+            self.detail_var.set(f"{status}{extra}    |    {dev['instance_id']}")
 
     # -- Right-click menu -----------------------------------------------------
 
@@ -1146,6 +1231,9 @@ class USBWatchApp:
         ttk.Checkbutton(frm, text="Windows toast notification", variable=v_toast).grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
         ttk.Checkbutton(frm, text="In-app banner + row highlight", variable=v_banner).grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
         ttk.Checkbutton(frm, text="Sound", variable=v_sound).grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
+        v_storage = tk.BooleanVar(value=self.cfg.get("alert_storage", True))
+        ttk.Checkbutton(frm, text="Flag USB storage (flash drives) with a distinct alert",
+                        variable=v_storage).grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
 
         ttk.Separator(frm, orient="horizontal").grid(row=r, column=0, columnspan=2, sticky="ew", pady=12); r += 1
 
@@ -1191,6 +1279,7 @@ class USBWatchApp:
             self.cfg["alert_toast"] = v_toast.get()
             self.cfg["alert_banner"] = v_banner.get()
             self.cfg["alert_sound"] = v_sound.get()
+            self.cfg["alert_storage"] = v_storage.get()
             self.cfg["unrecognized_only"] = v_unrec.get()
             self.cfg["theme"] = v_theme.get()
             self.cfg["text_size"] = v_size.get()
