@@ -1,0 +1,4 @@
+# Runtime dependencies for running USBSentry from source.
+# (Tkinter ships with Python on Windows and needs no install.)
+pystray>=0.19
+pillow>=10.0

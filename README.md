@@ -1,172 +1,128 @@
-<h1 align="center">🛡️ USBSentry</h1>
+<h1 align="center">USBSentry</h1>
 
 <p align="center">
   <strong>A simple, lightweight USB peripheral monitor for Windows 11.</strong><br>
-  See every connected USB device at a glance — and get alerted the instant a new one is plugged in.
+  See every connected USB device at a glance, know the instant a new one is plugged in,
+  and read off the COM port or drive letter without opening Device Manager.
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.1.0-blue" alt="Version 1.1.0">
+  <img src="https://img.shields.io/badge/version-1.2.0-blue" alt="Version 1.2.0">
   <img src="https://img.shields.io/badge/platform-Windows%2011-0078D6?logo=windows&logoColor=white" alt="Windows 11">
   <img src="https://img.shields.io/badge/python-3.13-3776AB?logo=python&logoColor=white" alt="Python 3.13">
-  <img src="https://img.shields.io/badge/UI-Tkinter-FF8C00" alt="Tkinter">
-  <img src="https://img.shields.io/badge/install-none%20needed-brightgreen" alt="No install needed">
+  <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="Apache 2.0">
 </p>
 
 ---
 
-## ✨ What it does
+## What it does
 
-USBSentry sits quietly in your system tray and keeps an eye on the USB bus. When
-you plug in a new device, it lets you know — with a notification, a sound, and a
-highlight in its live device list. Every connect and disconnect is logged so you
-have a permanent record of what's been plugged into your machine.
+USBSentry sits quietly in your system tray and watches the USB bus. When you plug in a
+new device, it lets you know, shows you its details, and logs the event. It is built to
+be simple, honest, and out of the way.
 
-## 🚀 Features
+## Features
 
-- **📋 Live device list** — every connected USB peripheral with its name, type, status, manufacturer, and `VID:PID`. Click any device to see its full instance ID.
-- **🔔 New-device alerts, three ways** — a Windows toast notification, an in-app banner + highlighted row, and a sound. Each can be toggled on or off independently.
-- **🕵️ Unrecognized-device mode** — trust the gear you already own and get alerted *only* when an unfamiliar device (a make/model you've never approved) shows up. Everything plugged in at first launch is auto-trusted; right-click any device to trust or untrust it afterward.
-- **🧹 "Real peripherals only"** — internal root hubs and generic USB hubs are hidden by default so the list stays clean. One checkbox reveals *everything* on the bus.
-- **📝 Durable event history** — every connect/disconnect is saved to `history.csv` automatically and survives restarts. Export the full log anywhere with one click.
-- **🪟 Stays out of the way** — closing the window hides it to the system tray, where it keeps watching. Quit only when *you* choose to.
-- **⚡ Lightweight & permission-free** — no drivers, no admin rights. Reads device info through Windows' own tooling.
+- **Live device list** with each device's type, status, manufacturer, and VID:PID.
+- **Port / Drive column** that shows the COM port for serial devices (ESP32, Arduino,
+  CP210x, CH340, FTDI) and the drive letter for USB storage.
+- **New-device alerts** three ways, each independently toggleable: a Windows toast, an
+  in-app banner with a highlighted row, and a sound.
+- **Unrecognized-device mode** that trusts the gear you already own and only alerts when
+  an unfamiliar make/model appears. Right-click any device to trust, untrust, or hide it.
+- **Dark, light, or follow-Windows theming**, an adjustable text size, and a live filter box.
+- **ESP32 helpers**: right-click a serial device to copy its COM port or a ready-made
+  esptool flash command.
+- **Durable event history** written to `history.csv` and exportable anywhere.
+- **System-tray operation**, plus a Quit button that fully exits when you want it gone.
 
-## 📥 Download & run
+## Download and run
 
-### Option A — the ready-made app (easiest, no Python needed)
+### Ready-made app (easiest, no Python needed)
 
-1. Go to the [**Releases**](https://github.com/AxialForge/USBSentry/releases/latest) page.
-2. Download **`USBSentry.exe`**.
-3. Double-click it. That's it.
+1. Open the [Releases](https://github.com/AxialForge/USBSentry/releases/latest) page.
+2. Download `USBSentry.exe`.
+3. Double-click it.
 
-> The first time you run it, Windows SmartScreen may show *"Windows protected
-> your PC"* because the app isn't code-signed. Click **More info → Run anyway**.
-> This is normal for small independent apps and only happens once.
+The first time you run a downloaded copy, Windows SmartScreen may show an
+"unrecognized app" notice. See [Getting past the SmartScreen warning](#getting-past-the-smartscreen-warning).
 
-### Option B — run from source (for tinkering)
+### Run from source
 
-Requires [Python 3](https://www.python.org/downloads/) with two small packages:
+Requires Python 3 with two small packages:
 
-```bash
-pip install pystray pillow
+```
+pip install -r requirements.txt
 python usbwatch.py
 ```
 
-Or just double-click **`USBSentry.bat`**.
+Or double-click `USBSentry.bat`.
 
-## 🖱️ Using it
+## Using it
 
 | Action | How |
 |---|---|
-| See all connected devices | It's the main window |
-| Inspect one device | Click its row → full instance ID shows at the bottom |
-| Hide but keep watching | Close the window (it goes to the tray) |
-| Bring the window back | Left-click the tray icon |
-| Refresh / Quit | Right-click the tray icon |
-| Show internal hubs too | Tick **"Show hubs & internal devices"** |
-| Trust / untrust a device | **Right-click** it in the list |
-| See or edit trusted devices | **Trusted devices…** button |
-| Export the event log | **Export log…** button → pick a location |
-| Change alerts / scan speed | **Settings…** button |
+| See all connected devices | The main window |
+| Read a device's COM port / drive | The Port / Drive column |
+| Filter the list | Type in the Filter box |
+| Trust / untrust / hide a device | Right-click it |
+| Copy a COM port or esptool command | Right-click a serial device |
+| See or edit trusted devices | Trusted devices button |
+| Export the event log | Export log button |
+| Change theme, text size, alerts | Settings |
+| Fully exit (no tray) | Quit button |
 
-## ⚙️ Settings
+## Settings
 
-Open **Settings…** to independently toggle each alert type (toast / banner /
-sound), turn **"Only alert for unrecognized devices"** on or off, and set how
-often USBSentry scans the bus (default: every 3 seconds). Your preferences are
-saved to `config.json` next to the app.
+Open Settings to toggle each alert type, switch between the unrecognized-only and
+all-new-devices alert modes, choose a theme (System / Light / Dark), pick a text size,
+and set how often USBSentry scans the bus. Preferences are saved to `config.json`.
 
-## 🕵️ Unrecognized-device mode
+## Unrecognized-device mode
 
-Tired of being alerted about your own keyboard and mouse? Turn on **"Only alert
-for unrecognized devices"** in Settings.
+Turn on "Only alert for unrecognized devices" and USBSentry stops nagging you about your
+own keyboard and mouse. Everything present at first launch is auto-trusted; after that,
+only an unfamiliar model (matched by VID:PID) raises an alert and shows in red. Trusted
+models are remembered in `known_devices.json`. Because matching is by model, moving your
+own device to a different port never counts as new.
 
-- Everything plugged in the **first time** you run USBSentry is automatically
-  trusted — it's all your own gear.
-- After that, only an **unfamiliar device** (a make/model — VID:PID — you've
-  never approved) triggers an alert. It shows up **red** in the list.
-- **Right-click** any device to **Trust** it (stops future alerts) or **Untrust**
-  it. Manage the whole list with the **Trusted devices…** button.
-- Trusted models are remembered in `known_devices.json` next to the app.
-
-Matching is by **device model**, so moving your own device to a different USB
-port never counts as "new."
-
-## 🟢 Start automatically on boot (optional)
+## Start automatically on boot
 
 1. Press `Win + R`, type `shell:startup`, and press Enter.
-2. Drop a **shortcut** to `USBSentry.exe` (or `USBSentry.bat`) into that folder.
+2. Drop a shortcut to `USBSentry.exe` into that folder.
 
-USBSentry will now start watching every time you log in.
+## Building the exe
 
-## 🛠️ Building the .exe yourself
-
-The release exe is built with [PyInstaller](https://pyinstaller.org/):
-
-```bash
+```
 pip install pyinstaller
-python -m PyInstaller --noconsole --onefile --name "USBSentry" --clean usbwatch.py
+python -m PyInstaller --noconsole --onefile --name "USBSentry" --icon "assets/USBSentry.ico" --add-data "assets;assets" --clean usbwatch.py
 ```
 
-The finished `USBSentry.exe` appears in the new `dist\` folder.
+## Getting past the SmartScreen warning
 
-## 🔍 How it works
+USBSentry is not code-signed, so Windows SmartScreen shows "Windows protected your PC"
+the first time you run a copy downloaded from the internet. It is an unrecognized-publisher
+notice, not a virus warning. Any of these clears it:
 
-USBSentry runs Windows' built-in `Get-PnpDevice` command every few seconds,
-filters the results to devices on the USB bus, and compares each snapshot to the
-last one. Anything new triggers an alert; anything missing is logged as removed.
-No kernel hooks, no polling drivers — just a light, transparent approach that
-needs no special privileges.
+- On the warning, click More info, then Run anyway (one time per download).
+- Right-click `USBSentry.exe`, choose Properties, tick Unblock, then OK.
+- Run from source instead, which never triggers SmartScreen.
 
-## 🧯 Troubleshooting
+A copy you build yourself locally has no "Mark of the Web" and runs without any warning.
 
-| Problem | Fix |
-|---|---|
-| No toast notifications | Check **Windows Settings → System → Notifications** is on, and that toasts are enabled in the app's **Settings…** |
-| "Windows protected your PC" on launch | See **Getting past the SmartScreen warning** below |
-| A device flickered and was missed | Lower the scan interval in **Settings…** |
-| Running from source fails | `pip install pystray pillow` (Tkinter ships with Python on Windows) |
+## How it works
 
-### Getting past the SmartScreen warning
+USBSentry runs Windows' built-in `Get-PnpDevice` command, filters the results to the USB
+bus, and compares each scan to the previous one. Anything new triggers an alert; anything
+missing is logged as removed. No drivers, no admin rights.
 
-USBSentry isn't code-signed (signing certificates cost money), so Windows
-SmartScreen shows *"Windows protected your PC"* the first time you run a copy
-**downloaded from the internet**. It's not a virus warning — just an
-"unrecognized publisher" notice. Any of these clears it:
+## Version history
 
-- **Click through it (simplest):** on the warning, click **More info → Run anyway**. One time per download.
-- **Unblock the file:** right-click `USBSentry.exe` → **Properties** → tick **☑ Unblock** at the bottom → **OK**. Or in PowerShell: `Unblock-File .\USBSentry.exe`
-- **Run from source instead:** launching via `USBSentry.bat` / `python usbwatch.py` never triggers SmartScreen.
+See [CHANGELOG.md](CHANGELOG.md) for the full list of changes in each version.
 
-> A copy you build yourself locally has no "Mark of the Web" and runs without any
-> warning — the prompt only appears on downloaded files.
+## License
 
-## 📂 Project structure
-
-```
-USBSentry/
-├── usbwatch.py      # the entire app (one file)
-├── USBSentry.bat    # launcher for the source version
-├── README.md        # this file
-└── .gitignore       # keeps build artifacts & personal files out of Git
-```
-
-The prebuilt **`USBSentry.exe`** is included in the repo for convenience (you can
-also grab it from [Releases](https://github.com/AxialForge/USBSentry/releases/latest)).
-Personal runtime files (`config.json`, `history.csv`, `known_devices.json`) are
-intentionally **not** tracked in Git.
-
-## 📄 License
-
-Copyright © 2026 **Joseph Costarella (AxialForge)**.
-
-USBSentry is licensed under the **[Apache License 2.0](LICENSE)**. You're free to
-use, modify, and distribute it — including commercially — provided you retain the
-copyright and license notices. The names "USBSentry" and "AxialForge" are
-reserved and not licensed for others' use. The software is provided **"as is"**,
-without warranty of any kind.
-
----
-
-<p align="center"><sub>Built for Windows 11 · Python + Tkinter · No install required</sub></p>
+Copyright 2026 Joseph Costarella (AxialForge). Licensed under the
+[Apache License 2.0](LICENSE). You may use, modify, and distribute it, including
+commercially, provided you keep the copyright and license notices. The names "USBSentry"
+and "AxialForge" are reserved. Provided "as is", without warranty of any kind.

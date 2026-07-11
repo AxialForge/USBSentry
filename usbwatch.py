@@ -31,6 +31,7 @@ Requires: pystray, Pillow (Tkinter ships with Python on Windows).
 """
 
 import csv
+import ctypes
 import json
 import os
 import queue
@@ -71,6 +72,29 @@ else:
 def resource_path(*parts):
     """Absolute path to a bundled asset (works both frozen and from source)."""
     return os.path.join(RESOURCE_DIR, *parts)
+
+
+def set_app_id():
+    """Give Windows an explicit app identity so the taskbar shows OUR icon
+    (instead of pythonw.exe's) and groups the app under its own name."""
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AxialForge.USBSentry")
+    except Exception:
+        pass
+
+
+def set_dark_titlebar(win, dark):
+    """Toggle the Windows immersive dark title bar for a Tk window/dialog."""
+    try:
+        win.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+        value = ctypes.c_int(1 if dark else 0)
+        for attr in (20, 19):  # 20 = Win11 / late Win10, 19 = earlier builds
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attr, ctypes.byref(value), ctypes.sizeof(value)) == 0:
+                break
+    except Exception:
+        pass
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 HISTORY_PATH = os.path.join(BASE_DIR, "history.csv")
@@ -203,7 +227,14 @@ _PS_QUERY = (
 )
 
 _VIDPID_RE = re.compile(r"VID_([0-9A-Fa-f]{4}).*?PID_([0-9A-Fa-f]{4})")
+_COM_RE = re.compile(r"\((COM\d+)\)")
 _HUB_RE = re.compile(r"root_hub|usb.*hub|generic usb hub", re.IGNORECASE)
+
+# USB vendor IDs commonly used by dev-board serial bridges (for a friendly hint).
+_SERIAL_VIDS = {
+    "303A": "Espressif (ESP32)", "10C4": "Silicon Labs CP210x",
+    "1A86": "WCH CH340", "0403": "FTDI", "2341": "Arduino", "2E8A": "Raspberry Pi",
+}
 
 _NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW
 
@@ -257,6 +288,10 @@ def get_devices(show_hubs):
 
         m = _VIDPID_RE.search(instance_id)
         vid_pid = f"{m.group(1).upper()}:{m.group(2).upper()}" if m else ""
+        vid = m.group(1).upper() if m else ""
+
+        cm = _COM_RE.search(name)
+        com_port = cm.group(1) if cm else ""
 
         devices[instance_id] = {
             "instance_id": instance_id,
@@ -265,6 +300,9 @@ def get_devices(show_hubs):
             "status": (item.get("Status") or "").strip(),
             "manufacturer": (item.get("Manufacturer") or "").strip(),
             "vid_pid": vid_pid,
+            "com_port": com_port,
+            "drive": "",  # populated later for USB storage
+            "board_hint": _SERIAL_VIDS.get(vid, ""),
         }
     return devices
 
@@ -306,6 +344,7 @@ def load_tray_images():
 
 class USBWatchApp:
     def __init__(self):
+        set_app_id()  # taskbar shows our icon, not pythonw.exe's
         self.cfg = load_config()
         self.devices = {}          # current snapshot {instance_id: dict}
         self.baseline_ready = False
@@ -409,13 +448,13 @@ class USBWatchApp:
         table_frame = ttk.Frame(self.root, padding=(10, 6))
         table_frame.pack(fill="both", expand=True)
 
-        cols = ("known", "name", "class", "status", "manufacturer", "vid_pid")
+        cols = ("known", "name", "port", "class", "status", "manufacturer", "vid_pid")
         headings = {
-            "known": "Known?", "name": "Device", "class": "Type", "status": "Status",
-            "manufacturer": "Manufacturer", "vid_pid": "VID:PID",
+            "known": "Known?", "name": "Device", "port": "Port / Drive", "class": "Type",
+            "status": "Status", "manufacturer": "Manufacturer", "vid_pid": "VID:PID",
         }
-        widths = {"known": 62, "name": 280, "class": 110, "status": 75,
-                  "manufacturer": 210, "vid_pid": 105}
+        widths = {"known": 60, "name": 250, "port": 90, "class": 100, "status": 70,
+                  "manufacturer": 180, "vid_pid": 100}
 
         self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="browse")
         for c in cols:
@@ -431,11 +470,16 @@ class USBWatchApp:
 
         # Right-click menu.
         self.ctx_menu = tk.Menu(self.tree, tearoff=0)
-        self.ctx_menu.add_command(label="Trust this device (stop alerting)", command=self._ctx_trust)
-        self.ctx_menu.add_command(label="Untrust this device", command=self._ctx_untrust)
-        self.ctx_menu.add_separator()
-        self.ctx_menu.add_command(label="Hide from list", command=self._ctx_hide)
-        self.ctx_menu.add_command(label="Unhide", command=self._ctx_unhide)
+        self.ctx_menu.add_command(label="Trust this device (stop alerting)", command=self._ctx_trust)  # 0
+        self.ctx_menu.add_command(label="Untrust this device", command=self._ctx_untrust)              # 1
+        self.ctx_menu.add_separator()                                                                  # 2
+        self.ctx_menu.add_command(label="Hide from list", command=self._ctx_hide)                      # 3
+        self.ctx_menu.add_command(label="Unhide", command=self._ctx_unhide)                            # 4
+        self.ctx_menu.add_separator()                                                                  # 5
+        self.ctx_menu.add_command(label="Copy VID:PID", command=self._ctx_copy_vidpid)                 # 6
+        self.ctx_menu.add_command(label="Copy COM port", command=self._ctx_copy_com)                   # 7
+        self.ctx_menu.add_command(label="Copy esptool flash command", command=self._ctx_copy_esptool)  # 8
+        self.CTX_COM, self.CTX_ESPTOOL = 7, 8
 
         # Legend
         self.legend = tk.Frame(self.root)
@@ -542,6 +586,13 @@ class USBWatchApp:
         self.ctx_menu.configure(bg=p["surface"], fg=p["fg"],
                                 activebackground=p["accent"], activeforeground="#ffffff")
         self._set_banner_idle()
+
+        # Match the Windows title bar to the theme.
+        set_dark_titlebar(self.root, self.theme == "dark")
+        if self.root.winfo_viewable():
+            # Nudge Windows to repaint the title bar after a live theme switch.
+            self.root.withdraw()
+            self.root.deiconify()
 
     def _build_tray(self):
         menu = pystray.Menu(
@@ -744,8 +795,9 @@ class USBWatchApp:
             known_mark = "✓" if trusted else "✕"
             if hidden:
                 known_mark += " (hidden)"
+            port_drive = dev.get("com_port") or dev.get("drive") or ""
             self.tree.insert("", "end", iid=iid, tags=tags, values=(
-                known_mark, dev["name"], dev["class"], dev["status"],
+                known_mark, dev["name"], port_drive, dev["class"], dev["status"],
                 dev["manufacturer"], dev["vid_pid"],
             ))
         if sel_id and self.tree.exists(sel_id):
@@ -771,10 +823,13 @@ class USBWatchApp:
         dev = self.devices[row]
         trusted = self.is_trusted(dev)
         hidden = device_key(dev) in self.hidden
+        has_com = bool(dev.get("com_port"))
         self.ctx_menu.entryconfigure(0, state="disabled" if trusted else "normal")
         self.ctx_menu.entryconfigure(1, state="normal" if trusted else "disabled")
         self.ctx_menu.entryconfigure(3, state="disabled" if hidden else "normal")
         self.ctx_menu.entryconfigure(4, state="normal" if hidden else "disabled")
+        self.ctx_menu.entryconfigure(self.CTX_COM, state="normal" if has_com else "disabled")
+        self.ctx_menu.entryconfigure(self.CTX_ESPTOOL, state="normal" if has_com else "disabled")
         self.ctx_menu.tk_popup(event.x_root, event.y_root)
 
     def _ctx_dev(self):
@@ -801,6 +856,29 @@ class USBWatchApp:
         dev = self._ctx_dev()
         if dev:
             self.unhide_device(dev)
+
+    def _copy(self, text, what):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.root.update()  # keep clipboard after the app closes
+        self._log(f"Copied {what}: {text}")
+
+    def _ctx_copy_vidpid(self):
+        dev = self._ctx_dev()
+        if dev and dev.get("vid_pid"):
+            self._copy(dev["vid_pid"], "VID:PID")
+
+    def _ctx_copy_com(self):
+        dev = self._ctx_dev()
+        if dev and dev.get("com_port"):
+            self._copy(dev["com_port"], "COM port")
+
+    def _ctx_copy_esptool(self):
+        dev = self._ctx_dev()
+        if dev and dev.get("com_port"):
+            cmd = (f"esptool --port {dev['com_port']} --baud 460800 "
+                   f"write_flash 0x0 firmware.bin")
+            self._copy(cmd, "esptool command")
 
     # -- Log ------------------------------------------------------------------
 
@@ -858,6 +936,7 @@ class USBWatchApp:
             win.iconbitmap(resource_path("assets", "USBSentry.ico"))
         except Exception:
             pass
+        set_dark_titlebar(win, self.theme == "dark")
         frm = ttk.Frame(win, padding=12)
         frm.pack(fill="both", expand=True)
 
@@ -924,6 +1003,7 @@ class USBWatchApp:
             win.iconbitmap(resource_path("assets", "USBSentry.ico"))
         except Exception:
             pass
+        set_dark_titlebar(win, self.theme == "dark")
         frm = ttk.Frame(win, padding=16)
         frm.pack(fill="both", expand=True)
         r = 0

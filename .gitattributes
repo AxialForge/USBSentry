@@ -1,0 +1,12 @@
+# Normalize line endings so Git stops warning about CRLF/LF.
+* text=auto
+*.py   text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.json text eol=lf
+*.bat  text eol=crlf
+
+# Treat binaries as binary (no line-ending conversion).
+*.png binary
+*.ico binary
+*.exe binary
