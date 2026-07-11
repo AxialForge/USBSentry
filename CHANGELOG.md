@@ -9,7 +9,12 @@ follows [Semantic Versioning](https://semver.org/) (MAJOR.MINOR.PATCH).
 - Port / Drive column: shows the COM port for serial devices (ESP32, Arduino,
   CP210x, CH340, FTDI) and, for USB storage, the drive letter.
 - ESP32 workflow: right-click a serial device to copy its COM port, its VID:PID,
-  or a ready-made esptool flash command.
+  or a ready-made esptool flash command; double-click a device to copy its port.
+- Watch-a-board: mark a device so you always get a port-aware toast
+  ("board -> COM3") when it reconnects, even if it's trusted.
+- Sound picker: choose the alert sound (Chime / Ding / Exclamation / Critical /
+  None) with a Test button.
+- Start-on-boot toggle in Settings, and a Clear log button.
 - Dark / light / follow-Windows theming, including a matching Windows title bar.
 - Adjustable text size (Small to Extra-large).
 - Live filter box to narrow the device list.

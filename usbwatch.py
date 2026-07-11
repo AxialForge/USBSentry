@@ -41,6 +41,7 @@ import subprocess
 import sys
 import threading
 import time
+import winreg
 import winsound
 from datetime import datetime
 
@@ -96,6 +97,50 @@ def set_dark_titlebar(win, dark):
     except Exception:
         pass
 
+
+# -- Run-on-boot (registry Run key) ------------------------------------------
+
+_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_RUN_NAME = "USBSentry"
+
+
+def _autostart_command():
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    if not os.path.exists(pyw):
+        pyw = sys.executable
+    return f'"{pyw}" "{os.path.abspath(__file__)}"'
+
+
+def autostart_enabled():
+    try:
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY)
+        try:
+            winreg.QueryValueEx(k, _RUN_NAME)
+            return True
+        finally:
+            winreg.CloseKey(k)
+    except OSError:
+        return False
+
+
+def set_autostart(enable):
+    try:
+        k = winreg.CreateKey(winreg.HKEY_CURRENT_USER, _RUN_KEY)
+    except OSError:
+        return
+    try:
+        if enable:
+            winreg.SetValueEx(k, _RUN_NAME, 0, winreg.REG_SZ, _autostart_command())
+        else:
+            try:
+                winreg.DeleteValue(k, _RUN_NAME)
+            except OSError:
+                pass
+    finally:
+        winreg.CloseKey(k)
+
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 HISTORY_PATH = os.path.join(BASE_DIR, "history.csv")
 KNOWN_PATH = os.path.join(BASE_DIR, "known_devices.json")
@@ -111,9 +156,30 @@ DEFAULT_CONFIG = {
     "theme": "system",          # "system" | "light" | "dark"
     "text_size": "Normal",      # Small | Normal | Large | Extra-large
     "hidden": [],               # device_keys hidden from the list
+    "sound_name": "Chime",      # which alert sound to play
+    "watched": [],              # device_keys to always announce on reconnect
 }
 
 TEXT_SIZES = {"Small": 8, "Normal": 10, "Large": 12, "Extra-large": 14}
+
+# Alert sounds (Windows system beeps). "None" is silent.
+SOUNDS = {
+    "Chime": winsound.MB_ICONASTERISK,
+    "Ding": winsound.MB_OK,
+    "Exclamation": winsound.MB_ICONEXCLAMATION,
+    "Critical": winsound.MB_ICONHAND,
+    "None": None,
+}
+
+
+def play_sound(name):
+    flag = SOUNDS.get(name, winsound.MB_ICONASTERISK)
+    if flag is None:
+        return
+    try:
+        winsound.MessageBeep(flag)
+    except RuntimeError:
+        pass
 
 
 def load_config():
@@ -355,6 +421,7 @@ class USBWatchApp:
         self.known_file_existed = os.path.exists(KNOWN_PATH)
         self.known = load_known()
         self.hidden = set(self.cfg.get("hidden", []))
+        self.watched = set(self.cfg.get("watched", []))
 
         # Resolve theme + base font size.
         self.theme = resolve_theme(self.cfg.get("theme", "system"))
@@ -443,6 +510,7 @@ class USBWatchApp:
         self.show_hidden_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(row2, text="Show hidden", variable=self.show_hidden_var,
                         command=self._redraw_table).pack(side="left", padx=(12, 0))
+        ttk.Button(row2, text="Clear log", command=self.clear_log).pack(side="right")
 
         # Device table
         table_frame = ttk.Frame(self.root, padding=(10, 6))
@@ -462,6 +530,7 @@ class USBWatchApp:
             self.tree.column(c, width=widths[c], anchor="center")  # centered text
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Button-3>", self._show_ctx_menu)
+        self.tree.bind("<Double-1>", self._on_double_click)
 
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
@@ -479,7 +548,10 @@ class USBWatchApp:
         self.ctx_menu.add_command(label="Copy VID:PID", command=self._ctx_copy_vidpid)                 # 6
         self.ctx_menu.add_command(label="Copy COM port", command=self._ctx_copy_com)                   # 7
         self.ctx_menu.add_command(label="Copy esptool flash command", command=self._ctx_copy_esptool)  # 8
-        self.CTX_COM, self.CTX_ESPTOOL = 7, 8
+        self.ctx_menu.add_separator()                                                                  # 9
+        self.ctx_menu.add_command(label="Watch this board (alert on reconnect)", command=self._ctx_watch)  # 10
+        self.ctx_menu.add_command(label="Stop watching this board", command=self._ctx_unwatch)         # 11
+        self.CTX_COM, self.CTX_ESPTOOL, self.CTX_WATCH, self.CTX_UNWATCH = 7, 8, 10, 11
 
         # Legend
         self.legend = tk.Frame(self.root)
@@ -663,14 +735,22 @@ class USBWatchApp:
                 self._log(f"NEW      {dev['name']}  [{dev.get('vid_pid', '')}]{flag}")
                 self._record_event("CONNECTED" if trusted else "CONNECTED-UNRECOGNIZED", dev)
 
+            # Watched boards always get their own port-aware toast; keep them out
+            # of the normal alert so we don't double-notify.
+            watched_added = [devices[a] for a in added if device_key(devices[a]) in self.watched]
+
             if self.cfg.get("unrecognized_only", True):
                 alert_devs = [devices[a] for a in added if not self.is_trusted(devices[a])]
             else:
                 alert_devs = [devices[a] for a in added]
+            alert_devs = [d for d in alert_devs if device_key(d) not in self.watched]
 
             if alert_devs:
                 unrecognized = any(not self.is_trusted(d) for d in alert_devs)
                 self._alert([d["name"] for d in alert_devs], unrecognized=unrecognized)
+
+            for d in watched_added:
+                self._announce_watched(d)
 
         self._redraw_table()
 
@@ -734,10 +814,7 @@ class USBWatchApp:
                 self.banner_var.set(f"\U0001F514  New device connected:  {joined}")
 
         if self.cfg["alert_sound"]:
-            try:
-                winsound.MessageBeep(winsound.MB_ICONASTERISK)
-            except RuntimeError:
-                pass
+            play_sound(self.cfg.get("sound_name", "Chime"))
 
         if self.cfg["alert_toast"]:
             title = "⚠ Unrecognized USB device!" if unrecognized else "USB device connected"
@@ -746,6 +823,28 @@ class USBWatchApp:
             except Exception:
                 pass
 
+        try:
+            self.icon.icon = self._tray_alert
+            self.root.after(4000, lambda: setattr(self.icon, "icon", self._tray_normal))
+        except Exception:
+            pass
+
+    def _announce_watched(self, dev):
+        """A watched board reconnected — always tell the user, with its port."""
+        port = dev.get("com_port") or dev.get("drive") or ""
+        arrow = f"  →  {port}" if port else ""
+        msg = f"{dev['name']}{arrow}"
+        self._log(f"WATCHED board connected:  {msg}")
+        if self.cfg["alert_banner"]:
+            self.banner.configure(bg=self.palette["accent"], fg="#ffffff")
+            self.banner_var.set(f"⚡  Watched board connected:  {msg}")
+        if self.cfg["alert_sound"]:
+            play_sound(self.cfg.get("sound_name", "Chime"))
+        if self.cfg["alert_toast"]:
+            try:
+                self.icon.notify(msg, "⚡ Watched board connected")
+            except Exception:
+                pass
         try:
             self.icon.icon = self._tray_alert
             self.root.after(4000, lambda: setattr(self.icon, "icon", self._tray_normal))
@@ -824,12 +923,15 @@ class USBWatchApp:
         trusted = self.is_trusted(dev)
         hidden = device_key(dev) in self.hidden
         has_com = bool(dev.get("com_port"))
+        watched = device_key(dev) in self.watched
         self.ctx_menu.entryconfigure(0, state="disabled" if trusted else "normal")
         self.ctx_menu.entryconfigure(1, state="normal" if trusted else "disabled")
         self.ctx_menu.entryconfigure(3, state="disabled" if hidden else "normal")
         self.ctx_menu.entryconfigure(4, state="normal" if hidden else "disabled")
         self.ctx_menu.entryconfigure(self.CTX_COM, state="normal" if has_com else "disabled")
         self.ctx_menu.entryconfigure(self.CTX_ESPTOOL, state="normal" if has_com else "disabled")
+        self.ctx_menu.entryconfigure(self.CTX_WATCH, state="disabled" if watched else "normal")
+        self.ctx_menu.entryconfigure(self.CTX_UNWATCH, state="normal" if watched else "disabled")
         self.ctx_menu.tk_popup(event.x_root, event.y_root)
 
     def _ctx_dev(self):
@@ -879,6 +981,33 @@ class USBWatchApp:
             cmd = (f"esptool --port {dev['com_port']} --baud 460800 "
                    f"write_flash 0x0 firmware.bin")
             self._copy(cmd, "esptool command")
+
+    def _ctx_watch(self):
+        dev = self._ctx_dev()
+        if dev:
+            self.watched.add(device_key(dev))
+            self.cfg["watched"] = sorted(self.watched)
+            save_config(self.cfg)
+            self._log(f"WATCHING   {dev['name']}  — you'll be alerted when it reconnects.")
+
+    def _ctx_unwatch(self):
+        dev = self._ctx_dev()
+        if dev and device_key(dev) in self.watched:
+            self.watched.discard(device_key(dev))
+            self.cfg["watched"] = sorted(self.watched)
+            save_config(self.cfg)
+            self._log(f"STOPPED WATCHING  {dev['name']}")
+
+    def _on_double_click(self, event):
+        row = self.tree.identify_row(event.y)
+        dev = self.devices.get(row)
+        if dev and (dev.get("com_port") or dev.get("drive")):
+            self._copy(dev.get("com_port") or dev.get("drive"), "port/drive")
+
+    def clear_log(self):
+        self.log.configure(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.configure(state="disabled")
 
     # -- Log ------------------------------------------------------------------
 
@@ -1039,11 +1168,24 @@ class USBWatchApp:
         ttk.Combobox(frm, textvariable=v_size, state="readonly", width=18,
                      values=list(TEXT_SIZES.keys())).grid(row=r, column=1, sticky="w", padx=(8, 0), pady=(6, 0)); r += 1
 
+        ttk.Label(frm, text="Alert sound:").grid(row=r, column=0, sticky="w", pady=(6, 0))
+        v_sound_name = tk.StringVar(value=self.cfg.get("sound_name", "Chime"))
+        sound_row = ttk.Frame(frm)
+        sound_row.grid(row=r, column=1, sticky="w", padx=(8, 0), pady=(6, 0)); r += 1
+        ttk.Combobox(sound_row, textvariable=v_sound_name, state="readonly", width=13,
+                     values=list(SOUNDS.keys())).pack(side="left")
+        ttk.Button(sound_row, text="Test", width=6,
+                   command=lambda: play_sound(v_sound_name.get())).pack(side="left", padx=(6, 0))
+
         ttk.Separator(frm, orient="horizontal").grid(row=r, column=0, columnspan=2, sticky="ew", pady=12); r += 1
 
         ttk.Label(frm, text="Scan every (seconds):").grid(row=r, column=0, sticky="w")
         v_poll = tk.IntVar(value=int(self.cfg["poll_seconds"]))
         ttk.Spinbox(frm, from_=1, to=60, textvariable=v_poll, width=6).grid(row=r, column=1, sticky="w", padx=(8, 0)); r += 1
+
+        v_autostart = tk.BooleanVar(value=autostart_enabled())
+        ttk.Checkbutton(frm, text="Start USBSentry when Windows starts",
+                        variable=v_autostart).grid(row=r, column=0, columnspan=2, sticky="w", pady=(10, 0)); r += 1
 
         def apply_and_close():
             self.cfg["alert_toast"] = v_toast.get()
@@ -1052,8 +1194,10 @@ class USBWatchApp:
             self.cfg["unrecognized_only"] = v_unrec.get()
             self.cfg["theme"] = v_theme.get()
             self.cfg["text_size"] = v_size.get()
+            self.cfg["sound_name"] = v_sound_name.get()
             self.cfg["poll_seconds"] = max(1, int(v_poll.get()))
             save_config(self.cfg)
+            set_autostart(v_autostart.get())
             # Re-resolve theme + font and re-skin everything live.
             self.theme = resolve_theme(self.cfg["theme"])
             self.palette = PALETTES[self.theme]
