@@ -22,6 +22,8 @@ USBSentry - a simple USB peripheral monitor for Windows 11.
   run, learns models (VID:PID) you approve, and flags anything unfamiliar.
 - Alerts three ways, each toggleable: Windows toast, in-app banner + row
   highlight, and a sound.
+- Light / dark / follow-Windows theming, adjustable text size, search filter,
+  and per-device hiding.
 - Lives in a normal window that hides to the system tray when closed;
   quit from the tray menu or the Quit button.
 
@@ -52,7 +54,7 @@ from PIL import Image, ImageDraw
 # ----------------------------------------------------------------------------
 
 APP_NAME = "USBSentry"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 # Where to keep config / history / known-devices files.
 # When frozen by PyInstaller, __file__ lives in a temp extraction dir that is
@@ -61,6 +63,7 @@ if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 HISTORY_PATH = os.path.join(BASE_DIR, "history.csv")
 KNOWN_PATH = os.path.join(BASE_DIR, "known_devices.json")
@@ -73,7 +76,12 @@ DEFAULT_CONFIG = {
     "alert_sound": True,        # play a chime
     "show_hubs": False,         # include root hubs / internal USB devices
     "unrecognized_only": True,  # alert only for devices not in the known list
+    "theme": "system",          # "system" | "light" | "dark"
+    "text_size": "Normal",      # Small | Normal | Large | Extra-large
+    "hidden": [],               # device_keys hidden from the list
 }
+
+TEXT_SIZES = {"Small": 8, "Normal": 10, "Large": 12, "Extra-large": 14}
 
 
 def load_config():
@@ -92,6 +100,55 @@ def save_config(cfg):
             json.dump(cfg, f, indent=2)
     except OSError:
         pass
+
+
+# ----------------------------------------------------------------------------
+# Theme palettes
+# ----------------------------------------------------------------------------
+
+PALETTES = {
+    "light": {
+        "bg": "#f0f0f0", "surface": "#ffffff", "fg": "#1a1a1a", "muted": "#555555",
+        "tree_bg": "#ffffff", "tree_fg": "#1a1a1a",
+        "sel_bg": "#2f6ec8", "sel_fg": "#ffffff",
+        "heading_bg": "#e4e4e4", "heading_fg": "#1a1a1a",
+        "banner_bg": "#2f6ec8", "banner_fg": "#ffffff",
+        "alert_bg": "#d9822b", "unrec_bg": "#c0392b",
+        "row_new_bg": "#fff2b2", "row_new_fg": "#1a1a1a",
+        "row_untrusted_bg": "#f8c9c4", "row_untrusted_fg": "#1a1a1a",
+        "entry_bg": "#ffffff", "entry_fg": "#1a1a1a",
+        "accent": "#2f6ec8",
+    },
+    "dark": {
+        "bg": "#1e1e1e", "surface": "#2a2a2b", "fg": "#e6e6e6", "muted": "#9a9a9a",
+        "tree_bg": "#252526", "tree_fg": "#e6e6e6",
+        "sel_bg": "#3d6ea5", "sel_fg": "#ffffff",
+        "heading_bg": "#333335", "heading_fg": "#e6e6e6",
+        "banner_bg": "#274b73", "banner_fg": "#ffffff",
+        "alert_bg": "#b5701f", "unrec_bg": "#a5342a",
+        "row_new_bg": "#4a4326", "row_new_fg": "#f4ead0",
+        "row_untrusted_bg": "#5a2b28", "row_untrusted_fg": "#f4cfcb",
+        "entry_bg": "#333335", "entry_fg": "#e6e6e6",
+        "accent": "#4d8fd6",
+    },
+}
+
+
+def resolve_theme(mode):
+    """Turn the configured theme mode into a concrete 'light'/'dark'."""
+    if mode in ("light", "dark"):
+        return mode
+    # "system": read the Windows apps theme preference.
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        val, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        winreg.CloseKey(key)
+        return "light" if val == 1 else "dark"
+    except OSError:
+        return "light"
 
 
 # ----------------------------------------------------------------------------
@@ -130,7 +187,6 @@ def save_known(known):
 # USB enumeration (via PowerShell's Get-PnpDevice)
 # ----------------------------------------------------------------------------
 
-# PowerShell that returns every present device sitting on the USB bus as JSON.
 _PS_QUERY = (
     "Get-PnpDevice -PresentOnly | "
     "Where-Object { $_.InstanceId -like 'USB\\*' } | "
@@ -139,10 +195,8 @@ _PS_QUERY = (
 )
 
 _VIDPID_RE = re.compile(r"VID_([0-9A-Fa-f]{4}).*?PID_([0-9A-Fa-f]{4})")
-# Root hubs and generic USB hubs we hide unless "show hubs" is on.
 _HUB_RE = re.compile(r"root_hub|usb.*hub|generic usb hub", re.IGNORECASE)
 
-# Hide the child PowerShell console window.
 _NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW
 
 
@@ -181,7 +235,6 @@ def get_devices(show_hubs):
     except ValueError:
         return {}
 
-    # ConvertTo-Json emits a bare object when there is exactly one device.
     if isinstance(data, dict):
         data = [data]
 
@@ -217,7 +270,6 @@ def make_tray_image(alert=False):
     d = ImageDraw.Draw(img)
     bg = (220, 90, 60) if alert else (40, 110, 200)
     d.ellipse((4, 4, 60, 60), fill=bg)
-    # A little USB-plug glyph in white.
     d.rectangle((28, 14, 36, 40), fill="white")
     d.polygon((26, 40, 38, 40, 32, 50), fill="white")
     d.ellipse((29, 9, 35, 15), fill="white")
@@ -234,21 +286,25 @@ class USBWatchApp:
     def __init__(self):
         self.cfg = load_config()
         self.devices = {}          # current snapshot {instance_id: dict}
-        self.baseline_ready = False  # first scan done -> alert on later changes
-        self.new_ids = set()       # ids to highlight in the table
-        self.events = queue.Queue()  # worker -> UI messages
+        self.baseline_ready = False
+        self.new_ids = set()
+        self.events = queue.Queue()
         self._stop = threading.Event()
 
-        # Known ("trusted") device models. If the file doesn't exist yet, this
-        # is the very first run — we auto-trust whatever is plugged in now.
         self.known_file_existed = os.path.exists(KNOWN_PATH)
-        self.known = load_known()  # {device_key: name}
+        self.known = load_known()
+        self.hidden = set(self.cfg.get("hidden", []))
+
+        # Resolve theme + base font size.
+        self.theme = resolve_theme(self.cfg.get("theme", "system"))
+        self.palette = PALETTES[self.theme]
+        self.base = TEXT_SIZES.get(self.cfg.get("text_size", "Normal"), 10)
 
         self._ensure_history_file()
         self._build_ui()
+        self.apply_theme()
         self._build_tray()
 
-        # Kick off the background scanner and the UI event pump.
         self.worker = threading.Thread(target=self._scan_loop, daemon=True)
         self.worker.start()
         self.root.after(200, self._pump_events)
@@ -258,23 +314,32 @@ class USBWatchApp:
     def _build_ui(self):
         self.root = tk.Tk()
         self.root.title(f"{APP_NAME} v{APP_VERSION}")
-        self.root.geometry("880x560")
-        self.root.minsize(720, 420)
+        self.root.geometry("920x600")
+        self.root.minsize(760, 460)
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
 
-        style = ttk.Style()
+        self.style = ttk.Style()
+        # 'clam' honours colour configuration, which native themes largely ignore
+        # — required for a working dark mode.
         try:
-            style.theme_use("vista")
+            self.style.theme_use("clam")
         except tk.TclError:
             pass
 
+        # Header strip: app name + version (in-app, always visible).
+        self.header = tk.Frame(self.root)
+        self.header.pack(fill="x")
+        self.header_title = tk.Label(self.header, text=f"  🛡  {APP_NAME}",
+                                     font=("Segoe UI", self.base + 4, "bold"), anchor="w")
+        self.header_title.pack(side="left", pady=6)
+        self.header_ver = tk.Label(self.header, text=f"v{APP_VERSION}  ",
+                                   font=("Segoe UI", self.base, "bold"))
+        self.header_ver.pack(side="right", pady=6)
+
         # Banner
         self.banner_var = tk.StringVar(value="Starting up…")
-        self.banner = tk.Label(
-            self.root, textvariable=self.banner_var, anchor="w",
-            font=("Segoe UI", 11, "bold"), bg="#2f6ec8", fg="white",
-            padx=12, pady=8,
-        )
+        self.banner = tk.Label(self.root, textvariable=self.banner_var, anchor="w",
+                               font=("Segoe UI", self.base + 1, "bold"), padx=12, pady=8)
         self.banner.pack(fill="x")
 
         # Toolbar
@@ -283,16 +348,29 @@ class USBWatchApp:
         ttk.Button(bar, text="Refresh now", command=self.refresh_now).pack(side="left")
         ttk.Button(bar, text="Trusted devices…", command=self.manage_known).pack(side="left", padx=(8, 0))
         ttk.Button(bar, text="Export log…", command=self.export_log).pack(side="left", padx=(8, 0))
-        self.show_hubs_var = tk.BooleanVar(value=self.cfg["show_hubs"])
-        ttk.Checkbutton(
-            bar, text="Show hubs & internal devices",
-            variable=self.show_hubs_var, command=self._toggle_hubs,
-        ).pack(side="left", padx=(12, 0))
         ttk.Button(bar, text="Settings…", command=self.open_settings).pack(side="right")
         ttk.Button(bar, text="Hide to tray", command=self.hide_window).pack(side="right", padx=(0, 8))
 
+        # Filter + view options row
+        row2 = ttk.Frame(self.root, padding=(10, 0))
+        row2.pack(fill="x")
+        ttk.Label(row2, text="Filter:").pack(side="left")
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", lambda *_: self._redraw_table())
+        ent = ttk.Entry(row2, textvariable=self.search_var, width=30)
+        ent.pack(side="left", padx=(6, 0))
+        ttk.Button(row2, text="✕", width=3,
+                   command=lambda: self.search_var.set("")).pack(side="left", padx=(4, 0))
+
+        self.show_hubs_var = tk.BooleanVar(value=self.cfg["show_hubs"])
+        ttk.Checkbutton(row2, text="Show hubs & internal", variable=self.show_hubs_var,
+                        command=self._toggle_hubs).pack(side="left", padx=(16, 0))
+        self.show_hidden_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row2, text="Show hidden", variable=self.show_hidden_var,
+                        command=self._redraw_table).pack(side="left", padx=(12, 0))
+
         # Device table
-        table_frame = ttk.Frame(self.root, padding=(10, 0))
+        table_frame = ttk.Frame(self.root, padding=(10, 6))
         table_frame.pack(fill="both", expand=True)
 
         cols = ("known", "name", "class", "status", "manufacturer", "vid_pid")
@@ -300,21 +378,14 @@ class USBWatchApp:
             "known": "Known?", "name": "Device", "class": "Type", "status": "Status",
             "manufacturer": "Manufacturer", "vid_pid": "VID:PID",
         }
-        widths = {"known": 62, "name": 280, "class": 110, "status": 75, "manufacturer": 210, "vid_pid": 105}
-        anchors = {"known": "center"}
+        widths = {"known": 62, "name": 280, "class": 110, "status": 75,
+                  "manufacturer": 210, "vid_pid": 105}
 
         self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="browse")
         for c in cols:
-            self.tree.heading(c, text=headings[c])
-            self.tree.column(c, width=widths[c], anchor=anchors.get(c, "w"))
-        self.tree.tag_configure("new", background="#fff2b2")        # newly connected (trusted)
-        self.tree.tag_configure("untrusted", background="#f8c9c4")  # not on the known list
+            self.tree.heading(c, text=headings[c], anchor="center")
+            self.tree.column(c, width=widths[c], anchor="center")  # centered text
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
-
-        # Right-click menu to trust/untrust a device.
-        self.ctx_menu = tk.Menu(self.tree, tearoff=0)
-        self.ctx_menu.add_command(label="Trust this device (stop alerting)", command=self._ctx_trust)
-        self.ctx_menu.add_command(label="Untrust this device", command=self._ctx_untrust)
         self.tree.bind("<Button-3>", self._show_ctx_menu)
 
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
@@ -322,27 +393,99 @@ class USBWatchApp:
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
-        # Legend for the row colors.
-        legend = tk.Frame(self.root)
-        legend.pack(fill="x", padx=12, pady=(4, 0))
-        tk.Label(legend, text="  Legend:  ", font=("Segoe UI", 8)).pack(side="left")
-        tk.Label(legend, text=" unrecognized ", bg="#f8c9c4", font=("Segoe UI", 8)).pack(side="left")
-        tk.Label(legend, text="   ", font=("Segoe UI", 8)).pack(side="left")
-        tk.Label(legend, text=" newly connected ", bg="#fff2b2", font=("Segoe UI", 8)).pack(side="left")
-        tk.Label(legend, text="    Right-click a device to trust / untrust it.",
-                 font=("Segoe UI", 8), fg="#555").pack(side="left")
+        # Right-click menu.
+        self.ctx_menu = tk.Menu(self.tree, tearoff=0)
+        self.ctx_menu.add_command(label="Trust this device (stop alerting)", command=self._ctx_trust)
+        self.ctx_menu.add_command(label="Untrust this device", command=self._ctx_untrust)
+        self.ctx_menu.add_separator()
+        self.ctx_menu.add_command(label="Hide from list", command=self._ctx_hide)
+        self.ctx_menu.add_command(label="Unhide", command=self._ctx_unhide)
 
-        # Detail line for the selected device
+        # Legend
+        self.legend = tk.Frame(self.root)
+        self.legend.pack(fill="x", padx=12, pady=(2, 0))
+        self.legend_label = tk.Label(self.legend, text="Legend:", font=("Segoe UI", self.base - 2))
+        self.legend_label.pack(side="left")
+        self.legend_unrec = tk.Label(self.legend, text=" unrecognized ", font=("Segoe UI", self.base - 2))
+        self.legend_unrec.pack(side="left", padx=(4, 0))
+        self.legend_new = tk.Label(self.legend, text=" newly connected ", font=("Segoe UI", self.base - 2))
+        self.legend_new.pack(side="left", padx=(8, 0))
+        self.legend_hint = tk.Label(self.legend, text="   Right-click a device to trust / hide it.",
+                                    font=("Segoe UI", self.base - 2))
+        self.legend_hint.pack(side="left")
+
+        # Detail line
         self.detail_var = tk.StringVar(value="Select a device to see its full instance ID.")
-        ttk.Label(self.root, textvariable=self.detail_var, anchor="w",
-                  padding=(12, 4)).pack(fill="x")
+        self.detail_label = tk.Label(self.root, textvariable=self.detail_var, anchor="w",
+                                     font=("Segoe UI", self.base - 1), padx=12, pady=4)
+        self.detail_label.pack(fill="x")
 
         # Event log
-        log_frame = ttk.LabelFrame(self.root, text="Activity log", padding=(8, 4))
-        log_frame.pack(fill="both", expand=False, padx=10, pady=(0, 10))
-        self.log = tk.Text(log_frame, height=7, wrap="none", state="disabled",
-                           font=("Consolas", 9))
+        self.log_frame = ttk.LabelFrame(self.root, text="Activity log", padding=(8, 4))
+        self.log_frame.pack(fill="both", expand=False, padx=10, pady=(0, 10))
+        self.log = tk.Text(self.log_frame, height=7, wrap="none", state="disabled",
+                           font=("Consolas", self.base - 1), relief="flat")
         self.log.pack(fill="both", expand=True)
+
+    def apply_theme(self):
+        """Apply the current palette + font size to every widget."""
+        p = self.palette
+        base = self.base
+        st = self.style
+
+        self.root.configure(bg=p["bg"])
+        st.configure(".", background=p["bg"], foreground=p["fg"],
+                     fieldbackground=p["surface"], font=("Segoe UI", base))
+        st.configure("TFrame", background=p["bg"])
+        st.configure("TLabel", background=p["bg"], foreground=p["fg"])
+        st.configure("TButton", background=p["surface"], foreground=p["fg"], padding=5)
+        st.map("TButton",
+               background=[("active", p["accent"]), ("pressed", p["accent"])],
+               foreground=[("active", "#ffffff")])
+        st.configure("TCheckbutton", background=p["bg"], foreground=p["fg"])
+        st.map("TCheckbutton", background=[("active", p["bg"])],
+               foreground=[("disabled", p["muted"])])
+        st.configure("TEntry", fieldbackground=p["entry_bg"], foreground=p["entry_fg"],
+                     insertcolor=p["fg"])
+        st.configure("TSpinbox", fieldbackground=p["entry_bg"], foreground=p["entry_fg"],
+                     insertcolor=p["fg"], arrowcolor=p["fg"])
+        st.configure("TCombobox", fieldbackground=p["entry_bg"], foreground=p["entry_fg"],
+                     arrowcolor=p["fg"])
+        st.configure("TLabelframe", background=p["bg"], foreground=p["fg"])
+        st.configure("TLabelframe.Label", background=p["bg"], foreground=p["fg"])
+        st.configure("TSeparator", background=p["bg"])
+        st.configure("Vertical.TScrollbar", background=p["surface"], troughcolor=p["bg"],
+                     arrowcolor=p["fg"])
+
+        st.configure("Treeview", background=p["tree_bg"], fieldbackground=p["tree_bg"],
+                     foreground=p["tree_fg"], font=("Segoe UI", base),
+                     rowheight=int(base * 2.4))
+        st.configure("Treeview.Heading", background=p["heading_bg"], foreground=p["heading_fg"],
+                     font=("Segoe UI", base, "bold"))
+        st.map("Treeview", background=[("selected", p["sel_bg"])],
+               foreground=[("selected", p["sel_fg"])])
+        self.tree.tag_configure("new", background=p["row_new_bg"], foreground=p["row_new_fg"])
+        self.tree.tag_configure("untrusted", background=p["row_untrusted_bg"],
+                                foreground=p["row_untrusted_fg"])
+
+        # Non-ttk widgets.
+        for w in (self.header, self.legend):
+            w.configure(bg=p["bg"])
+        self.header_title.configure(bg=p["bg"], fg=p["fg"], font=("Segoe UI", base + 4, "bold"))
+        self.header_ver.configure(bg=p["bg"], fg=p["muted"], font=("Segoe UI", base, "bold"))
+        self.legend_label.configure(bg=p["bg"], fg=p["muted"], font=("Segoe UI", base - 2))
+        self.legend_unrec.configure(bg=p["row_untrusted_bg"], fg=p["row_untrusted_fg"],
+                                    font=("Segoe UI", base - 2))
+        self.legend_new.configure(bg=p["row_new_bg"], fg=p["row_new_fg"],
+                                  font=("Segoe UI", base - 2))
+        self.legend_hint.configure(bg=p["bg"], fg=p["muted"], font=("Segoe UI", base - 2))
+        self.detail_label.configure(bg=p["bg"], fg=p["fg"], font=("Segoe UI", base - 1))
+        self.banner.configure(font=("Segoe UI", base + 1, "bold"))
+        self.log.configure(bg=p["surface"], fg=p["fg"], insertbackground=p["fg"],
+                           font=("Consolas", base - 1))
+        self.ctx_menu.configure(bg=p["surface"], fg=p["fg"],
+                                activebackground=p["accent"], activeforeground="#ffffff")
+        self._set_banner_idle()
 
     def _build_tray(self):
         menu = pystray.Menu(
@@ -358,10 +501,8 @@ class USBWatchApp:
 
     def _scan_loop(self):
         while not self._stop.is_set():
-            show_hubs = self.cfg["show_hubs"]
-            devices = get_devices(show_hubs)
+            devices = get_devices(self.cfg["show_hubs"])
             self.events.put(("snapshot", devices))
-            # Sleep in small slices so config/interval changes take effect fast.
             interval = max(1, int(self.cfg["poll_seconds"]))
             for _ in range(interval * 2):
                 if self._stop.is_set():
@@ -381,17 +522,12 @@ class USBWatchApp:
     def _apply_snapshot(self, devices):
         old_ids = set(self.devices)
         new_ids = set(devices)
-
         added = new_ids - old_ids
         removed = old_ids - new_ids
 
-        # First scan just establishes the baseline (no alerts for what's
-        # already plugged in).
         if not self.baseline_ready:
             self.devices = devices
             self.baseline_ready = True
-            # On the very first run, trust everything already connected — it's
-            # all the user's own gear.
             if not self.known_file_existed:
                 for dev in devices.values():
                     self.known[device_key(dev)] = dev["name"]
@@ -416,10 +552,9 @@ class USBWatchApp:
                 dev = devices[a]
                 trusted = self.is_trusted(dev)
                 flag = "" if trusted else "  <-- UNRECOGNIZED"
-                self._log(f"NEW      {dev['name']}  [{dev.get('vid_pid','')}]{flag}")
+                self._log(f"NEW      {dev['name']}  [{dev.get('vid_pid', '')}]{flag}")
                 self._record_event("CONNECTED" if trusted else "CONNECTED-UNRECOGNIZED", dev)
 
-            # Decide which of the new devices actually warrant an alert.
             if self.cfg.get("unrecognized_only", True):
                 alert_devs = [devices[a] for a in added if not self.is_trusted(devices[a])]
             else:
@@ -431,10 +566,8 @@ class USBWatchApp:
 
         self._redraw_table()
 
-        if not added:
-            # keep banner fresh with the current count / clear stale alert color
-            if not self.new_ids:
-                self._set_banner_idle()
+        if not added and not self.new_ids:
+            self._set_banner_idle()
 
     # -- Trust (known devices) -----------------------------------------------
 
@@ -457,19 +590,39 @@ class USBWatchApp:
             self._log(f"UNTRUSTED  {dev['name']}  [{key}]")
             self._redraw_table()
 
+    # -- Hide -----------------------------------------------------------------
+
+    def hide_device(self, dev):
+        key = device_key(dev)
+        if key:
+            self.hidden.add(key)
+            self.cfg["hidden"] = sorted(self.hidden)
+            save_config(self.cfg)
+            self._log(f"HIDDEN     {dev['name']}  [{key}]")
+            self._redraw_table()
+
+    def unhide_device(self, dev):
+        key = device_key(dev)
+        if key in self.hidden:
+            self.hidden.discard(key)
+            self.cfg["hidden"] = sorted(self.hidden)
+            save_config(self.cfg)
+            self._log(f"UNHIDDEN   {dev['name']}  [{key}]")
+            self._redraw_table()
+
     # -- Alerts ---------------------------------------------------------------
 
     def _alert(self, names, unrecognized=False):
         joined = ", ".join(names)
+        p = self.palette
 
         if self.cfg["alert_banner"]:
             if unrecognized:
-                self.banner.configure(bg="#c0392b")
+                self.banner.configure(bg=p["unrec_bg"], fg="#ffffff")
                 self.banner_var.set(
-                    f"⚠  UNRECOGNIZED device connected:  {joined}"
-                    f"    (right-click it to trust)")
+                    f"⚠  UNRECOGNIZED device connected:  {joined}    (right-click it to trust)")
             else:
-                self.banner.configure(bg="#d9822b")
+                self.banner.configure(bg=p["alert_bg"], fg="#ffffff")
                 self.banner_var.set(f"\U0001F514  New device connected:  {joined}")
 
         if self.cfg["alert_sound"]:
@@ -485,7 +638,6 @@ class USBWatchApp:
             except Exception:
                 pass
 
-        # Flash the tray icon red briefly.
         try:
             self.icon.icon = make_tray_image(alert=True)
             self.root.after(4000, lambda: setattr(self.icon, "icon", make_tray_image()))
@@ -493,29 +645,50 @@ class USBWatchApp:
             pass
 
     def _set_banner_idle(self):
-        self.banner.configure(bg="#2f6ec8")
-        n = len(self.devices)
-        self.banner_var.set(f"Monitoring — {n} USB peripheral(s) connected.")
+        p = self.palette
+        self.banner.configure(bg=p["banner_bg"], fg=p["banner_fg"])
+        n = len([d for d in self.devices.values() if device_key(d) not in self.hidden
+                 or self.show_hidden_var.get()])
+        self.banner_var.set(f"Monitoring — {n} USB peripheral(s) shown.")
 
     # -- Table ----------------------------------------------------------------
+
+    def _visible_devices(self):
+        """Devices after applying the hidden set and the search filter."""
+        term = self.search_var.get().strip().lower()
+        show_hidden = self.show_hidden_var.get()
+        out = []
+        for iid, dev in self.devices.items():
+            if device_key(dev) in self.hidden and not show_hidden:
+                continue
+            if term:
+                hay = " ".join([dev["name"], dev["class"], dev["manufacturer"],
+                                dev["vid_pid"], dev["status"]]).lower()
+                if term not in hay:
+                    continue
+            out.append((iid, dev))
+        out.sort(key=lambda kv: kv[1]["name"].lower())
+        return out
 
     def _redraw_table(self):
         selected = self.tree.selection()
         sel_id = selected[0] if selected else None
 
         self.tree.delete(*self.tree.get_children())
-        for iid, dev in sorted(self.devices.items(), key=lambda kv: kv[1]["name"].lower()):
+        for iid, dev in self._visible_devices():
             trusted = self.is_trusted(dev)
+            hidden = device_key(dev) in self.hidden
             if not trusted:
                 tags = ("untrusted",)
             elif iid in self.new_ids:
                 tags = ("new",)
             else:
                 tags = ()
-            # The tree item id (iid) is the device's instance_id.
+            known_mark = "✓" if trusted else "✕"
+            if hidden:
+                known_mark += " (hidden)"
             self.tree.insert("", "end", iid=iid, tags=tags, values=(
-                "✓" if trusted else "✕",
-                dev["name"], dev["class"], dev["status"],
+                known_mark, dev["name"], dev["class"], dev["status"],
                 dev["manufacturer"], dev["vid_pid"],
             ))
         if sel_id and self.tree.exists(sel_id):
@@ -530,7 +703,7 @@ class USBWatchApp:
             status = "TRUSTED (known)" if self.is_trusted(dev) else "NOT trusted — unrecognized"
             self.detail_var.set(f"{status}    |    Instance ID:  {dev['instance_id']}")
 
-    # -- Right-click trust menu ----------------------------------------------
+    # -- Right-click menu -----------------------------------------------------
 
     def _show_ctx_menu(self, event):
         row = self.tree.identify_row(event.y)
@@ -538,22 +711,39 @@ class USBWatchApp:
             return
         self.tree.selection_set(row)
         self._ctx_target = row
-        trusted = self.is_trusted(self.devices[row])
+        dev = self.devices[row]
+        trusted = self.is_trusted(dev)
+        hidden = device_key(dev) in self.hidden
         self.ctx_menu.entryconfigure(0, state="disabled" if trusted else "normal")
         self.ctx_menu.entryconfigure(1, state="normal" if trusted else "disabled")
+        self.ctx_menu.entryconfigure(3, state="disabled" if hidden else "normal")
+        self.ctx_menu.entryconfigure(4, state="normal" if hidden else "disabled")
         self.ctx_menu.tk_popup(event.x_root, event.y_root)
 
+    def _ctx_dev(self):
+        return self.devices.get(getattr(self, "_ctx_target", None))
+
     def _ctx_trust(self):
-        dev = self.devices.get(getattr(self, "_ctx_target", None))
+        dev = self._ctx_dev()
         if dev:
             self.trust_device(dev)
             if not self.new_ids:
                 self._set_banner_idle()
 
     def _ctx_untrust(self):
-        dev = self.devices.get(getattr(self, "_ctx_target", None))
+        dev = self._ctx_dev()
         if dev:
             self.untrust_device(dev)
+
+    def _ctx_hide(self):
+        dev = self._ctx_dev()
+        if dev:
+            self.hide_device(dev)
+
+    def _ctx_unhide(self):
+        dev = self._ctx_dev()
+        if dev:
+            self.unhide_device(dev)
 
     # -- Log ------------------------------------------------------------------
 
@@ -564,7 +754,7 @@ class USBWatchApp:
         self.log.see("end")
         self.log.configure(state="disabled")
 
-    # -- History (durable event log) -----------------------------------------
+    # -- History --------------------------------------------------------------
 
     def _ensure_history_file(self):
         if not os.path.exists(HISTORY_PATH):
@@ -575,12 +765,9 @@ class USBWatchApp:
                 pass
 
     def _record_event(self, action, dev):
-        """Append one connect/disconnect event to history.csv (persists across runs)."""
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        row = [
-            ts, action, dev.get("name", ""), dev.get("class", ""),
-            dev.get("vid_pid", ""), dev.get("instance_id", ""),
-        ]
+        row = [ts, action, dev.get("name", ""), dev.get("class", ""),
+               dev.get("vid_pid", ""), dev.get("instance_id", "")]
         try:
             with open(HISTORY_PATH, "a", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow(row)
@@ -588,15 +775,11 @@ class USBWatchApp:
             pass
 
     def export_log(self):
-        """Save a copy of the full event history to a location the user picks."""
         default = f"usb-history-{datetime.now().strftime('%Y%m%d-%H%M%S')}.csv"
         path = filedialog.asksaveasfilename(
-            parent=self.root,
-            title="Export USB event history",
-            defaultextension=".csv",
-            initialfile=default,
-            filetypes=[("CSV file", "*.csv"), ("Text file", "*.txt"), ("All files", "*.*")],
-        )
+            parent=self.root, title="Export USB event history",
+            defaultextension=".csv", initialfile=default,
+            filetypes=[("CSV file", "*.csv"), ("Text file", "*.txt"), ("All files", "*.*")])
         if not path:
             return
         self._ensure_history_file()
@@ -613,22 +796,25 @@ class USBWatchApp:
         win.title("Trusted (known) devices")
         win.transient(self.root)
         win.geometry("520x360")
+        win.configure(bg=self.palette["bg"])
         frm = ttk.Frame(win, padding=12)
         frm.pack(fill="both", expand=True)
 
         ttk.Label(frm, text="These device models are trusted and won't raise an "
                             "“unrecognized” alert:",
-                  font=("Segoe UI", 10, "bold"), wraplength=480).pack(anchor="w", pady=(0, 8))
+                  font=("Segoe UI", self.base, "bold"), wraplength=480).pack(anchor="w", pady=(0, 8))
 
         list_frame = ttk.Frame(frm)
         list_frame.pack(fill="both", expand=True)
-        lb = tk.Listbox(list_frame, activestyle="none")
+        p = self.palette
+        lb = tk.Listbox(list_frame, activestyle="none", bg=p["surface"], fg=p["fg"],
+                        selectbackground=p["sel_bg"], selectforeground=p["sel_fg"],
+                        font=("Segoe UI", self.base), relief="flat")
         lb.pack(side="left", fill="both", expand=True)
         lsb = ttk.Scrollbar(list_frame, orient="vertical", command=lb.yview)
         lb.configure(yscrollcommand=lsb.set)
         lsb.pack(side="right", fill="y")
 
-        # Keep a parallel list of keys matching the listbox order.
         order = sorted(self.known.items(), key=lambda kv: kv[1].lower())
         keys = [k for k, _ in order]
         for k, name in order:
@@ -648,15 +834,12 @@ class USBWatchApp:
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=(8, 0))
         ttk.Button(btns, text="Remove selected (untrust)", command=remove_selected).pack(side="left")
-        ttk.Label(btns, text=f"{len(keys)} trusted", foreground="#555").pack(side="right")
-        ttk.Button(btns, text="Close", command=win.destroy).pack(side="right", padx=(0, 12))
-
+        ttk.Button(btns, text="Close", command=win.destroy).pack(side="right")
         win.grab_set()
 
     # -- Actions --------------------------------------------------------------
 
     def refresh_now(self):
-        # Clear "new" highlights and re-scan immediately in a thread.
         self.new_ids.clear()
         self._set_banner_idle()
         self._redraw_table()
@@ -675,50 +858,69 @@ class USBWatchApp:
         win = tk.Toplevel(self.root)
         win.title("Settings")
         win.transient(self.root)
-        win.resizable(False, False)
+        win.configure(bg=self.palette["bg"])
         frm = ttk.Frame(win, padding=16)
         frm.pack(fill="both", expand=True)
+        r = 0
 
         ttk.Label(frm, text="Alert me when a new device connects by:",
-                  font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+                  font=("Segoe UI", self.base, "bold")).grid(row=r, column=0, columnspan=2, sticky="w", pady=(0, 8)); r += 1
 
         v_toast = tk.BooleanVar(value=self.cfg["alert_toast"])
         v_banner = tk.BooleanVar(value=self.cfg["alert_banner"])
         v_sound = tk.BooleanVar(value=self.cfg["alert_sound"])
-        ttk.Checkbutton(frm, text="Windows toast notification", variable=v_toast).grid(row=1, column=0, columnspan=2, sticky="w")
-        ttk.Checkbutton(frm, text="In-app banner + row highlight", variable=v_banner).grid(row=2, column=0, columnspan=2, sticky="w")
-        ttk.Checkbutton(frm, text="Sound", variable=v_sound).grid(row=3, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(frm, text="Windows toast notification", variable=v_toast).grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
+        ttk.Checkbutton(frm, text="In-app banner + row highlight", variable=v_banner).grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
+        ttk.Checkbutton(frm, text="Sound", variable=v_sound).grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
 
-        ttk.Separator(frm, orient="horizontal").grid(row=4, column=0, columnspan=2, sticky="ew", pady=12)
+        ttk.Separator(frm, orient="horizontal").grid(row=r, column=0, columnspan=2, sticky="ew", pady=12); r += 1
 
         v_unrec = tk.BooleanVar(value=self.cfg.get("unrecognized_only", True))
         ttk.Checkbutton(frm, text="Only alert for unrecognized (untrusted) devices",
-                        variable=v_unrec).grid(row=5, column=0, columnspan=2, sticky="w")
-        ttk.Label(frm, text="When on, devices you've trusted connect silently. "
-                            "Manage the list via “Trusted devices…”.",
-                  foreground="#555", wraplength=360).grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 4))
+                        variable=v_unrec).grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
+        ttk.Label(frm, text="When on, devices you've trusted connect silently.",
+                  foreground=self.palette["muted"], wraplength=380).grid(row=r, column=0, columnspan=2, sticky="w", pady=(0, 4)); r += 1
 
-        ttk.Separator(frm, orient="horizontal").grid(row=7, column=0, columnspan=2, sticky="ew", pady=12)
+        ttk.Separator(frm, orient="horizontal").grid(row=r, column=0, columnspan=2, sticky="ew", pady=12); r += 1
 
-        ttk.Label(frm, text="Scan every (seconds):").grid(row=8, column=0, sticky="w")
+        # Appearance
+        ttk.Label(frm, text="Appearance:", font=("Segoe UI", self.base, "bold")).grid(row=r, column=0, columnspan=2, sticky="w", pady=(0, 6)); r += 1
+        ttk.Label(frm, text="Theme:").grid(row=r, column=0, sticky="w")
+        v_theme = tk.StringVar(value=self.cfg.get("theme", "system"))
+        ttk.Combobox(frm, textvariable=v_theme, state="readonly", width=18,
+                     values=["system", "light", "dark"]).grid(row=r, column=1, sticky="w", padx=(8, 0)); r += 1
+        ttk.Label(frm, text="Text size:").grid(row=r, column=0, sticky="w", pady=(6, 0))
+        v_size = tk.StringVar(value=self.cfg.get("text_size", "Normal"))
+        ttk.Combobox(frm, textvariable=v_size, state="readonly", width=18,
+                     values=list(TEXT_SIZES.keys())).grid(row=r, column=1, sticky="w", padx=(8, 0), pady=(6, 0)); r += 1
+
+        ttk.Separator(frm, orient="horizontal").grid(row=r, column=0, columnspan=2, sticky="ew", pady=12); r += 1
+
+        ttk.Label(frm, text="Scan every (seconds):").grid(row=r, column=0, sticky="w")
         v_poll = tk.IntVar(value=int(self.cfg["poll_seconds"]))
-        ttk.Spinbox(frm, from_=1, to=60, textvariable=v_poll, width=6).grid(row=8, column=1, sticky="w", padx=(8, 0))
+        ttk.Spinbox(frm, from_=1, to=60, textvariable=v_poll, width=6).grid(row=r, column=1, sticky="w", padx=(8, 0)); r += 1
 
         def apply_and_close():
             self.cfg["alert_toast"] = v_toast.get()
             self.cfg["alert_banner"] = v_banner.get()
             self.cfg["alert_sound"] = v_sound.get()
             self.cfg["unrecognized_only"] = v_unrec.get()
+            self.cfg["theme"] = v_theme.get()
+            self.cfg["text_size"] = v_size.get()
             self.cfg["poll_seconds"] = max(1, int(v_poll.get()))
             save_config(self.cfg)
-            win.destroy()
+            # Re-resolve theme + font and re-skin everything live.
+            self.theme = resolve_theme(self.cfg["theme"])
+            self.palette = PALETTES[self.theme]
+            self.base = TEXT_SIZES.get(self.cfg["text_size"], 10)
+            self.apply_theme()
             self._redraw_table()
+            win.destroy()
 
         btns = ttk.Frame(frm)
-        btns.grid(row=9, column=0, columnspan=2, sticky="e", pady=(16, 0))
+        btns.grid(row=r, column=0, columnspan=2, sticky="e", pady=(16, 0))
         ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right", padx=(8, 0))
         ttk.Button(btns, text="Save", command=apply_and_close).pack(side="right")
-
         win.grab_set()
 
     # -- Window / tray plumbing ----------------------------------------------
@@ -738,7 +940,6 @@ class USBWatchApp:
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
-        # Viewing the window clears the new-device highlights.
         self.new_ids.clear()
         self._set_banner_idle()
         self._redraw_table()
