@@ -44,7 +44,7 @@ import winsound
 from datetime import datetime
 
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox
 
 import pystray
 from PIL import Image, ImageDraw
@@ -61,8 +61,16 @@ APP_VERSION = "1.2.0"
 # deleted on exit, so we must use the folder that actually holds the .exe.
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
+    # Bundled read-only assets live in the PyInstaller extraction dir.
+    RESOURCE_DIR = getattr(sys, "_MEIPASS", BASE_DIR)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    RESOURCE_DIR = BASE_DIR
+
+
+def resource_path(*parts):
+    """Absolute path to a bundled asset (works both frozen and from source)."""
+    return os.path.join(RESOURCE_DIR, *parts)
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 HISTORY_PATH = os.path.join(BASE_DIR, "history.csv")
@@ -117,7 +125,7 @@ PALETTES = {
         "row_new_bg": "#fff2b2", "row_new_fg": "#1a1a1a",
         "row_untrusted_bg": "#f8c9c4", "row_untrusted_fg": "#1a1a1a",
         "entry_bg": "#ffffff", "entry_fg": "#1a1a1a",
-        "accent": "#2f6ec8",
+        "accent": "#2f6ec8", "border": "#c4c4c4",
     },
     "dark": {
         "bg": "#1e1e1e", "surface": "#2a2a2b", "fg": "#e6e6e6", "muted": "#9a9a9a",
@@ -129,7 +137,7 @@ PALETTES = {
         "row_new_bg": "#4a4326", "row_new_fg": "#f4ead0",
         "row_untrusted_bg": "#5a2b28", "row_untrusted_fg": "#f4cfcb",
         "entry_bg": "#333335", "entry_fg": "#e6e6e6",
-        "accent": "#4d8fd6",
+        "accent": "#4d8fd6", "border": "#3a3a3d",
     },
 }
 
@@ -278,6 +286,20 @@ def make_tray_image(alert=False):
     return img
 
 
+def load_tray_images():
+    """Return (normal, alert) tray images from the bundled icon, with a fallback."""
+    try:
+        base = Image.open(resource_path("assets", "USBSentry_256.png")).convert("RGBA")
+    except Exception:
+        return make_tray_image(False), make_tray_image(True)
+    alert = base.copy()
+    d = ImageDraw.Draw(alert)
+    w = base.width
+    d.ellipse((w * 0.52, w * 0.52, w * 0.97, w * 0.97), fill=(214, 40, 40, 255),
+              outline=(255, 255, 255, 255), width=max(2, w // 40))
+    return base, alert
+
+
 # ----------------------------------------------------------------------------
 # Main application
 # ----------------------------------------------------------------------------
@@ -318,6 +340,12 @@ class USBWatchApp:
         self.root.minsize(760, 460)
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
 
+        # Window / taskbar icon.
+        try:
+            self.root.iconbitmap(resource_path("assets", "USBSentry.ico"))
+        except Exception:
+            pass
+
         self.style = ttk.Style()
         # 'clam' honours colour configuration, which native themes largely ignore
         # — required for a working dark mode.
@@ -326,10 +354,17 @@ class USBWatchApp:
         except tk.TclError:
             pass
 
-        # Header strip: app name + version (in-app, always visible).
+        # Header strip: app icon + name + version (in-app, always visible).
         self.header = tk.Frame(self.root)
         self.header.pack(fill="x")
-        self.header_title = tk.Label(self.header, text=f"  🛡  {APP_NAME}",
+        self._header_img = None
+        try:
+            self._header_img = tk.PhotoImage(file=resource_path("assets", "USBSentry_32.png"))
+            tk.Label(self.header, image=self._header_img, bd=0).pack(side="left", padx=(10, 0), pady=6)
+        except Exception:
+            pass
+        title_text = f"{APP_NAME}" if self._header_img else f"  🛡  {APP_NAME}"
+        self.header_title = tk.Label(self.header, text=f"  {title_text}",
                                      font=("Segoe UI", self.base + 4, "bold"), anchor="w")
         self.header_title.pack(side="left", pady=6)
         self.header_ver = tk.Label(self.header, text=f"v{APP_VERSION}  ",
@@ -348,7 +383,8 @@ class USBWatchApp:
         ttk.Button(bar, text="Refresh now", command=self.refresh_now).pack(side="left")
         ttk.Button(bar, text="Trusted devices…", command=self.manage_known).pack(side="left", padx=(8, 0))
         ttk.Button(bar, text="Export log…", command=self.export_log).pack(side="left", padx=(8, 0))
-        ttk.Button(bar, text="Settings…", command=self.open_settings).pack(side="right")
+        ttk.Button(bar, text="Quit", command=self.confirm_quit).pack(side="right")
+        ttk.Button(bar, text="Settings…", command=self.open_settings).pack(side="right", padx=(0, 8))
         ttk.Button(bar, text="Hide to tray", command=self.hide_window).pack(side="right", padx=(0, 8))
 
         # Filter + view options row
@@ -434,34 +470,54 @@ class USBWatchApp:
         st = self.style
 
         self.root.configure(bg=p["bg"])
+        # Flatten clam's 3-D bevels so borders don't look odd, especially in dark.
         st.configure(".", background=p["bg"], foreground=p["fg"],
-                     fieldbackground=p["surface"], font=("Segoe UI", base))
+                     fieldbackground=p["surface"], font=("Segoe UI", base),
+                     bordercolor=p["border"], lightcolor=p["bg"], darkcolor=p["bg"],
+                     troughcolor=p["surface"], focuscolor=p["accent"])
         st.configure("TFrame", background=p["bg"])
         st.configure("TLabel", background=p["bg"], foreground=p["fg"])
-        st.configure("TButton", background=p["surface"], foreground=p["fg"], padding=5)
+        st.configure("TButton", background=p["surface"], foreground=p["fg"], padding=5,
+                     bordercolor=p["border"], lightcolor=p["surface"], darkcolor=p["surface"])
         st.map("TButton",
                background=[("active", p["accent"]), ("pressed", p["accent"])],
-               foreground=[("active", "#ffffff")])
+               foreground=[("active", "#ffffff"), ("pressed", "#ffffff")])
         st.configure("TCheckbutton", background=p["bg"], foreground=p["fg"])
         st.map("TCheckbutton", background=[("active", p["bg"])],
-               foreground=[("disabled", p["muted"])])
+               foreground=[("disabled", p["muted"])],
+               indicatorcolor=[("selected", p["accent"]), ("!selected", p["surface"])])
         st.configure("TEntry", fieldbackground=p["entry_bg"], foreground=p["entry_fg"],
-                     insertcolor=p["fg"])
+                     insertcolor=p["fg"], bordercolor=p["border"], borderwidth=1)
         st.configure("TSpinbox", fieldbackground=p["entry_bg"], foreground=p["entry_fg"],
-                     insertcolor=p["fg"], arrowcolor=p["fg"])
+                     insertcolor=p["fg"], arrowcolor=p["fg"], bordercolor=p["border"])
+        st.map("TSpinbox", foreground=[("readonly", p["entry_fg"])])
+        # Combobox: fix invisible readonly text + theme the dropdown list.
         st.configure("TCombobox", fieldbackground=p["entry_bg"], foreground=p["entry_fg"],
-                     arrowcolor=p["fg"])
-        st.configure("TLabelframe", background=p["bg"], foreground=p["fg"])
+                     arrowcolor=p["fg"], bordercolor=p["border"])
+        st.map("TCombobox",
+               fieldbackground=[("readonly", p["entry_bg"]), ("disabled", p["bg"])],
+               foreground=[("readonly", p["entry_fg"]), ("disabled", p["muted"])],
+               selectbackground=[("readonly", p["entry_bg"])],
+               selectforeground=[("readonly", p["entry_fg"])],
+               arrowcolor=[("readonly", p["fg"])])
+        self.root.option_add("*TCombobox*Listbox.background", p["surface"])
+        self.root.option_add("*TCombobox*Listbox.foreground", p["fg"])
+        self.root.option_add("*TCombobox*Listbox.selectBackground", p["sel_bg"])
+        self.root.option_add("*TCombobox*Listbox.selectForeground", p["sel_fg"])
+        st.configure("TLabelframe", background=p["bg"], foreground=p["fg"],
+                     bordercolor=p["border"])
         st.configure("TLabelframe.Label", background=p["bg"], foreground=p["fg"])
-        st.configure("TSeparator", background=p["bg"])
+        st.configure("TSeparator", background=p["border"])
         st.configure("Vertical.TScrollbar", background=p["surface"], troughcolor=p["bg"],
-                     arrowcolor=p["fg"])
+                     arrowcolor=p["fg"], bordercolor=p["border"])
 
         st.configure("Treeview", background=p["tree_bg"], fieldbackground=p["tree_bg"],
                      foreground=p["tree_fg"], font=("Segoe UI", base),
-                     rowheight=int(base * 2.4))
+                     rowheight=int(base * 2.4), borderwidth=0, relief="flat")
         st.configure("Treeview.Heading", background=p["heading_bg"], foreground=p["heading_fg"],
-                     font=("Segoe UI", base, "bold"))
+                     font=("Segoe UI", base, "bold"), relief="flat", borderwidth=1)
+        st.map("Treeview.Heading", background=[("active", p["accent"])],
+               foreground=[("active", "#ffffff")])
         st.map("Treeview", background=[("selected", p["sel_bg"])],
                foreground=[("selected", p["sel_fg"])])
         self.tree.tag_configure("new", background=p["row_new_bg"], foreground=p["row_new_fg"])
@@ -494,7 +550,8 @@ class USBWatchApp:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._tray_quit),
         )
-        self.icon = pystray.Icon(APP_NAME, make_tray_image(), f"{APP_NAME} v{APP_VERSION}", menu)
+        self._tray_normal, self._tray_alert = load_tray_images()
+        self.icon = pystray.Icon(APP_NAME, self._tray_normal, f"{APP_NAME} v{APP_VERSION}", menu)
         threading.Thread(target=self.icon.run, daemon=True).start()
 
     # -- Background scanning --------------------------------------------------
@@ -639,8 +696,8 @@ class USBWatchApp:
                 pass
 
         try:
-            self.icon.icon = make_tray_image(alert=True)
-            self.root.after(4000, lambda: setattr(self.icon, "icon", make_tray_image()))
+            self.icon.icon = self._tray_alert
+            self.root.after(4000, lambda: setattr(self.icon, "icon", self._tray_normal))
         except Exception:
             pass
 
@@ -797,6 +854,10 @@ class USBWatchApp:
         win.transient(self.root)
         win.geometry("520x360")
         win.configure(bg=self.palette["bg"])
+        try:
+            win.iconbitmap(resource_path("assets", "USBSentry.ico"))
+        except Exception:
+            pass
         frm = ttk.Frame(win, padding=12)
         frm.pack(fill="both", expand=True)
 
@@ -859,6 +920,10 @@ class USBWatchApp:
         win.title("Settings")
         win.transient(self.root)
         win.configure(bg=self.palette["bg"])
+        try:
+            win.iconbitmap(resource_path("assets", "USBSentry.ico"))
+        except Exception:
+            pass
         frm = ttk.Frame(win, padding=16)
         frm.pack(fill="both", expand=True)
         r = 0
@@ -946,6 +1011,15 @@ class USBWatchApp:
 
     def _tray_quit(self, *_):
         self.root.after(0, self.quit)
+
+    def confirm_quit(self):
+        """Fully exit the app (does NOT stay in the tray)."""
+        if messagebox.askyesno(
+                APP_NAME,
+                "Quit USBSentry completely?\n\n"
+                "It will stop monitoring and will NOT keep running in the system tray.",
+                parent=self.root, icon="warning"):
+            self.quit()
 
     def quit(self):
         self._stop.set()
