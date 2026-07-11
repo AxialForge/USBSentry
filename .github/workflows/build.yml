@@ -6,6 +6,10 @@ on:
       - "v*"
   workflow_dispatch:
 
+# Allow the workflow to attach built exes to releases.
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
